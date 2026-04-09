@@ -54,7 +54,7 @@ def enforce_single_instance():
         sys.exit(0)
 
 # ===================== 本地路径与配置系统 =====================
-APP_DATA_DIR = r"D:\专注王者（个人软件数据）"
+APP_DATA_DIR = r"D:\桌面\专注王者（个人软件数据）"
 OLD_APP_CONFIG_FILE = os.path.expanduser("~/.study_game_config.json")
 APP_CONFIG_FILE = os.path.join(APP_DATA_DIR, ".study_game_config.json")
 app_config = {
