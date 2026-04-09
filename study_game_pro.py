@@ -150,12 +150,11 @@ def init_data():
             if "incentive_claims" not in global_data:
                 global_data["incentive_claims"] = {"night": "", "noon": ""}
 
-        if app_config.get("rewards_history_reset_date") != today_str:
-            global_data["daily_rewards_history"] = []
+        if not app_config.get("rewards_history_reset_done"):
+            # Only reset once on first migration, not every day
             app_config["rewards_history_reset_done"] = True
             app_config["rewards_history_reset_date"] = today_str
             save_app_config()
-            save_data()
 
         global_data.setdefault("last_checkin_date", today_str)
     else:
@@ -828,7 +827,7 @@ class StudyGameUI(BaseTk):
                 break
         if not updated:
             history.append({"date": date_str, "rate": rate, "reward": reward})
-        history = sorted(history, key=lambda x: x.get("date", ""))[-20:]
+        history = sorted(history, key=lambda x: x.get("date", ""))[-365:]
         global_data["daily_rewards_history"] = history
 
     # ====================================
@@ -1545,14 +1544,15 @@ class StudyGameUI(BaseTk):
             # --- 历史复盘曲线 ---
             ax3 = fig.add_subplot(gs[1, 1])
             history = global_data.get("daily_rewards_history", [])
-            if not history:
+            filtered_history = [item for item in history if start_str <= item.get("date", "") <= end_str]
+            if not filtered_history:
                 ax3.text(0.5, 0.5, '暂无完成率/奖惩记录', ha='center', va='center')
                 ax3.axis('off')
             else:
-                history = sorted(history, key=lambda x: x.get("date", ""))[-20:]
-                dates = [item.get('date', '')[-5:] for item in history]
-                rates = [item.get('rate', 0) for item in history]
-                rewards = [item.get('reward', 0) for item in history]
+                filtered_history = sorted(filtered_history, key=lambda x: x.get("date", ""))
+                dates = [item.get('date', '')[-5:] for item in filtered_history]
+                rates = [item.get('rate', 0) for item in filtered_history]
+                rewards = [item.get('reward', 0) for item in filtered_history]
 
                 ax3.plot(dates, rates, marker='o', color='#1E90FF', linewidth=2, label='完成率(%)')
                 ax3.set_ylim(0, 100)
@@ -1634,7 +1634,6 @@ class StudyGameUI(BaseTk):
         dialog.destroy()
         global_data["today_review_submitted"] = True
         global_data["total_points"] += pts
-        global_data["daily_rewards_history"].append({"date": datetime.now().strftime("%Y-%m-%d"), "reward": pts})
         
         penalty = self.get_penalty_by_rate(completion_rate) if total_tasks > 0 else 0
         if penalty < 0:
@@ -1642,6 +1641,9 @@ class StudyGameUI(BaseTk):
             global_data["last_penalty_date"] = datetime.now().strftime("%Y-%m-%d")
         else:
             global_data["last_penalty_date"] = datetime.now().strftime("%Y-%m-%d")
+
+        delta = pts + (penalty if penalty < 0 else 0)
+        self.upsert_daily_reward_history(datetime.now().strftime("%Y-%m-%d"), completion_rate, delta)
 
         save_data()
         
