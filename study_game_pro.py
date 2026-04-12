@@ -50,11 +50,11 @@ def enforce_single_instance():
         instance_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         instance_socket.bind(('127.0.0.1', 38594))
     except socket.error:
-        windows_force_top_alert("启动拦截", "【专注王者】已经在运行中了！请查看任务栏或系统托盘。")
+        windows_force_top_alert("启动拦截", "【改变自己】已经在运行中了！请查看任务栏或系统托盘。")
         sys.exit(0)
 
 # ===================== 本地路径与配置系统 =====================
-APP_DATA_DIR = r"D:\桌面\专注王者（个人软件数据）"
+APP_DATA_DIR = r"D:\桌面\专注改变（个人软件数据）"
 OLD_APP_CONFIG_FILE = os.path.expanduser("~/.study_game_config.json")
 APP_CONFIG_FILE = os.path.join(APP_DATA_DIR, ".study_game_config.json")
 app_config = {
@@ -234,7 +234,7 @@ BaseTk = TkinterDnD.Tk if TK_DND_AVAILABLE else tk.Tk
 class StudyGameUI(BaseTk):
     def __init__(self):
         super().__init__()
-        self.title("✨专注王者✨")
+        self.title("✨改变自己✨")
         self.geometry("780x580")  
         self.configure(bg="#FFF0F5")
         self.resizable(False, False)
@@ -420,7 +420,7 @@ class StudyGameUI(BaseTk):
         self.points_label = tk.Label(self.header_frame, text="🪙 积分: 0", font=("Microsoft YaHei", 20, "bold"), bg="#FFB6C1", fg="#FFFFFF")
         self.points_label.pack()
         
-        self.games_label = tk.Label(self.header_frame, text="🎮 可换王者: 0 局 | 额度: 0/0", font=("Microsoft YaHei", 11), bg="#FFB6C1", fg="#FFFFFF")
+        self.games_label = tk.Label(self.header_frame, text="✨ 今日还有多少时间改变自己: 0 分钟 | 额度: ∞", font=("Microsoft YaHei", 11), bg="#FFB6C1", fg="#FFFFFF")
         self.games_label.pack(pady=2)
 
         self.discount_info_label = tk.Label(self.header_frame, text="", font=("Microsoft YaHei", 9, "bold"), bg="#FFB6C1", fg="#FFFFE0")
@@ -1284,7 +1284,7 @@ class StudyGameUI(BaseTk):
 
     def show_charts_window(self):
         chart_win = tk.Toplevel(self)
-        chart_win.title("📊 学习与游戏数据全景看板")
+        chart_win.title("📊 学习与改变自己时间看板")
         chart_win.geometry("980x880") 
         chart_win.configure(bg="white")
 
@@ -1444,14 +1444,14 @@ class StudyGameUI(BaseTk):
                 messagebox.showwarning("范围错误", "结束日期不能早于开始日期。")
                 return
 
-            hours_bins = {'科研': [0]*24, '理论/技术': [0]*24, '未分类旧数据': [0]*24, '游戏': [0]*24}
-            totals = {'科研': 0, '理论/技术': 0, '未分类旧数据': 0, '游戏': 0}
+            hours_bins = {'科研': [0]*24, '理论/技术': [0]*24, '改变自己': [0]*24}
+            totals = {'科研': 0, '理论/技术': 0, '改变自己': 0}
 
             for item in global_data.get("study_history", []):
                 dt_str = item["date"]
-                cat = item.get("category", "未分类旧数据")
-                if cat not in hours_bins:
-                    cat = "未分类旧数据"
+                cat = item.get("category", "")
+                if cat not in ['科研', '理论/技术']:
+                    continue
                 end_dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
                 duration = item["study_time"]
                 start_dt = end_dt - timedelta(minutes=duration)
@@ -1473,25 +1473,25 @@ class StudyGameUI(BaseTk):
                     if start_str <= seg_date <= end_str:
                         bins = self.split_time_to_bins(seg_start, seg_mins)
                         for h, val in enumerate(bins):
-                            hours_bins['游戏'][h] += val
-                        totals['游戏'] += seg_mins
+                            hours_bins['改变自己'][h] += val
+                        totals['改变自己'] += seg_mins
 
             fig.clf() 
-            colors = {'科研':'#87CEFA', '理论/技术':'#98FB98', '未分类旧数据':'#D3D3D3', '游戏':'#FF69B4'}
+            colors = {'科研':'#87CEFA', '理论/技术':'#98FB98', '改变自己':'#FF69B4'}
             
             ax1 = fig.add_subplot(gs[0, :])
             x = np.arange(24)
             width = 0.4  
             
-            study_cats = ['科研', '理论/技术', '未分类旧数据']
+            study_cats = ['科研', '理论/技术']
             bottom_study = np.zeros(24)
             for cat in study_cats:
                 arr = np.array(hours_bins[cat])
                 ax1.bar(x - width/2, arr, width, label=cat, bottom=bottom_study, color=colors[cat], edgecolor='white')
                 bottom_study += arr
 
-            arr_game = np.array(hours_bins['游戏'])
-            ax1.bar(x + width/2, arr_game, width, label='游戏', color=colors['游戏'], edgecolor='white')
+            arr_game = np.array(hours_bins['改变自己'])
+            ax1.bar(x + width/2, arr_game, width, label='改变自己', color=colors['改变自己'], edgecolor='white')
 
             for i in range(24):
                 if bottom_study[i] > 0:
@@ -1539,7 +1539,7 @@ class StudyGameUI(BaseTk):
             else:
                 ax2.pie(pie_sizes, labels=pie_labels, colors=pie_colors, autopct=absolute_value_autopct, startangle=90, textprops={'fontsize': 10})
             total_minutes = sum(totals.values())
-            ax2.set_title(f"【{title_str}】任务类型与游戏总耗时 (总计 {self.format_minutes(total_minutes)})", fontsize=11)
+            ax2.set_title(f"【{title_str}】任务类型耗时分布 (总计 {self.format_minutes(total_minutes)})", fontsize=11)
 
             # --- 历史复盘曲线 ---
             ax3 = fig.add_subplot(gs[1, 1])
@@ -1602,7 +1602,8 @@ class StudyGameUI(BaseTk):
             global_data["today_review_text"] = content
             global_data["today_review_submitted"] = True
             save_data()
-            log_text = f"【今日复盘】\n{global_data['today_review_text']}\n{'='*40}\n"
+            task_status_text = self.build_task_status_lines(global_data.get("today_structured_tasks", {}))
+            log_text = f"【今日复盘】\n{task_status_text}\n今日反思：\n{global_data['today_review_text']}\n{'='*40}\n"
             self.log_to_txt("review", log_text)
             dialog.destroy()
             messagebox.showinfo("提交成功", "复盘已提交，零点后将自动结算完成率奖惩。")
@@ -1820,19 +1821,28 @@ class StudyGameUI(BaseTk):
     def update_dashboard(self):
         pts = global_data["total_points"]
         monthly_tomatoes = sum(1 for item in global_data.get("study_history", []) if item["date"].startswith(datetime.now().strftime("%Y-%m")))
-        discount = (monthly_tomatoes // 30) * 5
+        # Learning 100 minutes gives 25 minutes of "改变自己"
+        # Every 40 Pomodoros adds 5 minutes to the rate (100 mins -> 30 mins)
+        bonus = (monthly_tomatoes // 40) * 5
+        rate = 25 + bonus  # This means 100 learning minutes = rate minutes of change
         
-        cost, max_ex = (max(75, 125 - discount), 3) if is_workday() else (max(50, 75 - discount), 10)
-        today_ex = self.get_today_point_exchange_count()
+        # 1 point = 1 minute of learning. Cost per minute of change is 100 / rate
+        cost_per_minute = 100 / rate
+        
+        # No workday/weekend limits => max_ex conceptually infinite, but we'll adapt today_ex to tracking if wanted
+        # It's better to just calculate playable time directly
+        today_ex = self.get_today_point_exchange_count() # Still tracks count if used
         incentive_pool = int(global_data.get("today_incentive_pool", 0))
-        point_games = 0
-        if cost > 0:
-            point_games = min(pts // cost, max(0, max_ex - today_ex))
-        today_playable = point_games + incentive_pool
+        
+        point_time = 0
+        if cost_per_minute > 0:
+            point_time = int(pts / cost_per_minute)
+            
+        today_playable = point_time + incentive_pool
         
         self.points_label.config(text=f"总积分: {pts}")
-        self.games_label.config(text=f"🎮 今日可玩: {today_playable} 局 | 积分可换: {point_games} 局 ({cost}分/局) | 激励池: {incentive_pool} 局 | 额度: {max(0, max_ex - today_ex)}/{max_ex}次")
-        self.discount_info_label.config(text=f"📌 本月累计番茄: {monthly_tomatoes} 个 | " + (f"再专注 {30 - (monthly_tomatoes % 30)} 个，单局立减 5 分！" if cost > (75 if is_workday() else 50) else "已肝至本月【史低兑换价】！"))
+        self.games_label.config(text=f"✨ 今日还有多少时间改变自己: {today_playable} 分钟 | 积分可换: {point_time} 分钟 ({cost_per_minute:.1f}分/分钟) | 激励池: {incentive_pool} 分钟")
+        self.discount_info_label.config(text=f"📌 本月累计番茄: {monthly_tomatoes} 个 | 再专注 {40 - (monthly_tomatoes % 40)} 个，比例提升 5 分！(当前兑换比: 100分换{rate}分)")
 
     def get_today_point_exchange_count(self):
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -1853,7 +1863,7 @@ class StudyGameUI(BaseTk):
         tk.Label(shop, text="请选择兑换方式", font=("Microsoft YaHei", 11, "bold"), bg="#FFF0F5").pack(pady=(16, 10))
 
         btn_style = {"font": ("Microsoft YaHei", 10, "bold"), "fg": "white", "width": 22, "pady": 8, "bd": 0}
-        tk.Button(shop, text="🎮 一局王者荣耀兑换", bg="#98FB98", activebackground="#32CD32", command=self.exchange_points, **btn_style).pack(pady=6)
+        tk.Button(shop, text="🎮 兑换【改变自己】时间", bg="#98FB98", activebackground="#32CD32", command=self.exchange_points, **btn_style).pack(pady=6)
         tk.Button(shop, text="⭐ 激励计划", bg="#87CEFA", activebackground="#00BFFF", command=self.open_incentive_plan, **btn_style).pack(pady=6)
         tk.Button(shop, text="关闭", bg="#CCCCCC", fg="black", width=10, bd=0, command=shop.destroy).pack(pady=(8, 0))
 
@@ -1874,7 +1884,7 @@ class StudyGameUI(BaseTk):
 
         btn_night = tk.Button(btn_frame, text="前一天晚上没有带手机上床且醒了立即下床", bg="#FFB6C1", fg="white", font=("Microsoft YaHei", 9, "bold"), bd=0, wraplength=360, justify=tk.LEFT)
         btn_noon = tk.Button(btn_frame, text="中午没有带手机上床且醒了立即下床", bg="#FFD700", fg="white", font=("Microsoft YaHei", 9, "bold"), bd=0, wraplength=360, justify=tk.LEFT)
-        btn_redeem = tk.Button(btn_frame, text="兑换激励局", bg="#98FB98", fg="white", font=("Microsoft YaHei", 10, "bold"), bd=0)
+        btn_redeem = tk.Button(btn_frame, text="兑换激励分钟 (改变自己)", bg="#98FB98", fg="white", font=("Microsoft YaHei", 10, "bold"), bd=0)
 
         btn_night.pack(fill=tk.X, pady=6)
         btn_noon.pack(fill=tk.X, pady=6)
@@ -1887,7 +1897,7 @@ class StudyGameUI(BaseTk):
             noon_claimed = claims.get("noon") == today_str
             pool = int(global_data.get("today_incentive_pool", 0))
 
-            pool_label.config(text=f"当前激励可兑换: {pool} 局")
+            pool_label.config(text=f"当前激励可兑换: {pool} 分钟 (改变自己)")
             btn_night.config(state=tk.DISABLED if night_claimed else tk.NORMAL)
             btn_noon.config(state=tk.DISABLED if noon_claimed else tk.NORMAL)
             btn_redeem.config(state=tk.NORMAL if pool > 0 else tk.DISABLED)
@@ -1902,7 +1912,7 @@ class StudyGameUI(BaseTk):
             claims["night"] = today_str
             global_data["incentive_claims"] = claims
             save_data()
-            messagebox.showinfo("激励奖励", f"抽中 {reward} 局王者荣耀，已加入可兑换池。", parent=dialog)
+            messagebox.showinfo("激励奖励", f"抽中 {reward} 分钟【改变自己】时间，已加入可兑换池。", parent=dialog)
             refresh_state()
 
         def claim_noon():
@@ -1915,7 +1925,7 @@ class StudyGameUI(BaseTk):
             claims["noon"] = today_str
             global_data["incentive_claims"] = claims
             save_data()
-            messagebox.showinfo("激励奖励", "获得 1 局王者荣耀，已加入可兑换池。", parent=dialog)
+            messagebox.showinfo("激励奖励", "获得 1 分钟【改变自己】时间，已加入可兑换池。", parent=dialog)
             refresh_state()
 
         def redeem_incentive():
@@ -1924,17 +1934,17 @@ class StudyGameUI(BaseTk):
                 return
             count = 1
             if pool > 1:
-                count = simpledialog.askinteger("兑换激励局", f"当前可兑换 {pool} 局，想兑换几局？", minvalue=1, maxvalue=pool, parent=dialog)
+                count = simpledialog.askinteger("兑换激励分钟 (改变自己)", f"当前可兑换 {pool} 分钟 (改变自己)，想兑换几分钟 (改变自己)？", minvalue=1, maxvalue=pool, parent=dialog)
                 if count is None:
                     return
-            if not messagebox.askyesno("兑换确认", f"确定兑换 {count} 局王者荣耀吗？", parent=dialog):
+            if not messagebox.askyesno("兑换确认", f"确定兑换 {count} 分钟【改变自己】时间吗？", parent=dialog):
                 return
 
             for _ in range(count):
-                global_data["today_exchanged_time"] += 25
+                global_data["today_exchanged_time"] += 1
                 global_data["exchange_history"].append({
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "exchange_time": 25,
+                    "exchange_time": 1,
                     "used_points": 0,
                     "source": "incentive"
                 })
@@ -1942,7 +1952,7 @@ class StudyGameUI(BaseTk):
             global_data["today_incentive_pool"] = pool - count
             save_data()
             self.update_dashboard()
-            messagebox.showinfo("兑换成功", f"已兑换 {count} 局王者荣耀。", parent=dialog)
+            messagebox.showinfo("兑换成功", f"已兑换 {count} 分钟【改变自己】时间。", parent=dialog)
             refresh_state()
 
         btn_night.config(command=claim_night)
@@ -1954,28 +1964,37 @@ class StudyGameUI(BaseTk):
         if not global_data.get("today_task_submitted"):
             messagebox.showwarning("拦截", "请先提交今天的任务清单！")
             return
-            
-        workday = is_workday()
-        max_exchanges = 3 if workday else 10
-        today_exchanges = self.get_today_point_exchange_count()
-        
-        if today_exchanges >= max_exchanges:
-            messagebox.showwarning("拦截", "达到了今日防沉迷上限！")
-            return
 
         monthly_tomatoes = sum(1 for item in global_data.get("study_history", []) if item["date"].startswith(datetime.now().strftime("%Y-%m")))
-        cost = max(75, 125 - (monthly_tomatoes // 30) * 5) if workday else max(50, 75 - (monthly_tomatoes // 30) * 5)
+        bonus = (monthly_tomatoes // 40) * 5
+        rate = 25 + bonus
+        cost_per_minute = 100 / rate
             
-        if global_data["total_points"] < cost:
-            messagebox.showwarning("积分不足", f"换一局需要 {cost} 积分，先去赚积分吧！")
+        pts = global_data["total_points"]
+        max_mins = int(pts / cost_per_minute)
+
+        if max_mins < 1:
+            messagebox.showwarning("积分不足", f"换1分钟【改变自己】时间需要 {cost_per_minute:.1f} 积分，先去赚积分吧！")
             return
             
-        if messagebox.askyesno("兑换确认", f"确定消耗 {cost} 积分兑换 1 局王者荣耀吗？"):
-            global_data["total_points"] -= cost
-            global_data["today_exchanged_time"] += 25
-            global_data["exchange_history"].append({"date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "exchange_time": 25, "used_points": cost})
+        count = simpledialog.askinteger("兑换时间", f"当前积分可兑换最多 {max_mins} 分钟【改变自己】。\n你想兑换多少分钟？", minvalue=1, maxvalue=max_mins)
+        if count is None or count <= 0:
+            return
+            
+        total_cost = int(count * cost_per_minute)
+
+        if messagebox.askyesno("兑换确认", f"确定消耗 {total_cost} 积分兑换 {count} 分钟【改变自己】时间吗？"):
+            global_data["total_points"] -= total_cost
+            global_data["today_exchanged_time"] += count
+            global_data["exchange_history"].append({
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "exchange_time": count,
+                "used_points": total_cost,
+                "source": "points"
+            })
             save_data()
             self.update_dashboard()
+            messagebox.showinfo("兑换成功", f"成功消耗 {total_cost} 积分，兑换了 {count} 分钟！")
 
 if __name__ == "__main__":
     enforce_single_instance()
