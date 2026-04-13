@@ -54,12 +54,19 @@ def enforce_single_instance():
         sys.exit(0)
 
 # ===================== 本地路径与配置系统 =====================
-APP_DATA_DIR = r"D:\桌面\专注改变（个人软件数据）"
+DATA_FOLDER_NAME = "专注改变（个人软件数据）"
+LEGACY_DATA_DIR = r"D:\专注改变（个人软件数据）"
+LEGACY_CONFIG_FILE = os.path.join(LEGACY_DATA_DIR, ".study_game_config.json")
 OLD_APP_CONFIG_FILE = os.path.expanduser("~/.study_game_config.json")
-APP_CONFIG_FILE = os.path.join(APP_DATA_DIR, ".study_game_config.json")
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".study_game")
+APP_CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 app_config = {
-    "data_dir": APP_DATA_DIR,
+    "data_dir": "",
     "memo_dir": "",
+    "storage_root_dir": "",
+    "storage_dir_confirmed": False,
+    "cancel_month": "",
+    "cancel_count": 0,
     "memo_date": "",
     "memo_count": 0,
     "review_reminder_date": "",
@@ -74,19 +81,28 @@ PENALTY_MULTIPLIER = 1.5
 
 def load_app_config():
     global app_config
-    if not os.path.exists(APP_DATA_DIR):
-        os.makedirs(APP_DATA_DIR, exist_ok=True)
-    if not os.path.exists(APP_CONFIG_FILE) and os.path.exists(OLD_APP_CONFIG_FILE):
-        try:
-            shutil.move(OLD_APP_CONFIG_FILE, APP_CONFIG_FILE)
-        except Exception:
-            pass
+    if not os.path.exists(APP_CONFIG_FILE):
+        for legacy_path in (OLD_APP_CONFIG_FILE, LEGACY_CONFIG_FILE):
+            if os.path.exists(legacy_path):
+                try:
+                    os.makedirs(CONFIG_DIR, exist_ok=True)
+                    shutil.move(legacy_path, APP_CONFIG_FILE)
+                except Exception:
+                    pass
+                break
     if os.path.exists(APP_CONFIG_FILE):
         with open(APP_CONFIG_FILE, "r", encoding="utf-8") as f:
             try: app_config.update(json.load(f))
             except Exception: pass
+    if app_config.get("data_dir") and not app_config.get("storage_root_dir"):
+        app_config["storage_root_dir"] = os.path.dirname(app_config["data_dir"])
+    if app_config.get("storage_root_dir") and not app_config.get("data_dir"):
+        app_config["data_dir"] = os.path.join(app_config["storage_root_dir"], DATA_FOLDER_NAME)
+    if app_config.get("storage_root_dir") and "storage_dir_confirmed" not in app_config:
+        app_config["storage_dir_confirmed"] = True
 
 def save_app_config():
+    os.makedirs(CONFIG_DIR, exist_ok=True)
     with open(APP_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(app_config, f, ensure_ascii=False, indent=4)
 
@@ -113,20 +129,7 @@ def notify_system(title, message, duration=6):
 # ===================== 数据核心逻辑 =====================
 def init_data():
     global global_data, DATA_FILE_PATH
-    load_app_config()
 
-    if app_config.get("data_dir") != APP_DATA_DIR:
-        old_dir = app_config.get("data_dir")
-        if old_dir:
-            old_data_path = os.path.join(old_dir, DATA_FILE_NAME)
-            new_data_path = os.path.join(APP_DATA_DIR, DATA_FILE_NAME)
-            if os.path.exists(old_data_path) and not os.path.exists(new_data_path):
-                try:
-                    shutil.move(old_data_path, new_data_path)
-                except Exception:
-                    pass
-        app_config["data_dir"] = APP_DATA_DIR
-        save_app_config()
     
     if app_config.get("data_dir"):
         DATA_FILE_PATH = os.path.join(app_config["data_dir"], DATA_FILE_NAME)
@@ -240,6 +243,8 @@ class StudyGameUI(BaseTk):
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         
+        load_app_config()
+        self.ensure_storage_directory()
         init_data()
         self.time_left = 0
         self.timer_running = False
@@ -334,6 +339,16 @@ class StudyGameUI(BaseTk):
         settlement_msg = None
 
         if last_checkin_str != today_str:
+            tasks_snapshot = {
+                cat: [dict(t) for t in global_data.get("today_structured_tasks", {}).get(cat, [])]
+                for cat in TASK_CATS
+            }
+            if last_checkin_str:
+                self.log_daily_task_time(last_checkin_str, tasks_snapshot)
+            carryover_tasks = {
+                cat: [t for t in tasks_snapshot.get(cat, []) if not t.get("done")]
+                for cat in TASK_CATS
+            }
             if last_checkin_str:
                 settlement_msg = f"已结算昨日({last_checkin_str})"
             if last_checkin_str and global_data.get("last_penalty_date") != last_checkin_str:
@@ -388,9 +403,9 @@ class StudyGameUI(BaseTk):
             global_data["today_study_time"] = 0
             global_data["today_exchanged_time"] = 0
             global_data["today_incentive_pool"] = 0
-            global_data["today_task_submitted"] = False
+            global_data["today_task_submitted"] = any(carryover_tasks.get(cat) for cat in TASK_CATS)
             global_data["today_review_submitted"] = False
-            global_data["today_structured_tasks"] = {cat: [] for cat in TASK_CATS}
+            global_data["today_structured_tasks"] = carryover_tasks
             global_data["today_review_text"] = ""
             global_data["last_checkin_date"] = today_str
             save_data()
@@ -957,6 +972,7 @@ class StudyGameUI(BaseTk):
         self.cat_labels = {}
         self.cat_frames = {}
         self.task_cbs = {} 
+        self.task_cancel_btns = {}
 
         def toggle_task(cat, idx):
             var, cb = self.task_cbs[(cat, idx)]
@@ -977,6 +993,9 @@ class StudyGameUI(BaseTk):
 
             global_data["today_structured_tasks"][cat][idx]["done"] = is_done
             cb.configure(font=self.font_strike if is_done else self.font_normal, fg="gray" if is_done else "black")
+            cancel_btn = self.task_cancel_btns.get((cat, idx))
+            if cancel_btn is not None:
+                cancel_btn.configure(state=tk.DISABLED if is_done else tk.NORMAL)
             check_category_status(cat)
             save_data()
             self.update_task_status_label()
@@ -1000,10 +1019,15 @@ class StudyGameUI(BaseTk):
             entry_widget.delete(0, tk.END)
             new_index = len(global_data["today_structured_tasks"][cat]) - 1
             cat_frame = self.cat_frames[cat]
+            row = tk.Frame(cat_frame, bg="white")
+            row.pack(anchor="w", padx=20, pady=2, fill=tk.X)
             var = tk.BooleanVar(value=False)
-            cb = tk.Checkbutton(cat_frame, text=text, variable=var, font=self.font_normal, fg="black", bg="white", activebackground="white", selectcolor="#E0FFFF", justify=tk.LEFT, anchor="w", wraplength=280, command=lambda c=cat, idx=new_index: toggle_task(c, idx))
-            cb.pack(anchor="w", padx=25, pady=2)
+            cb = tk.Checkbutton(row, text=text, variable=var, font=self.font_normal, fg="black", bg="white", activebackground="white", selectcolor="#E0FFFF", justify=tk.LEFT, anchor="w", wraplength=240, command=lambda c=cat, idx=new_index: toggle_task(c, idx))
+            cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            cancel_btn = tk.Button(row, text="取消", font=("Microsoft YaHei", 8), bg="#FFB6C1", fg="white", bd=0, width=5, command=lambda c=cat, idx=new_index: self.handle_task_cancel(c, idx, viewer))
+            cancel_btn.pack(side=tk.RIGHT, padx=(6, 0))
             self.task_cbs[(cat, new_index)] = (var, cb)
+            self.task_cancel_btns[(cat, new_index)] = cancel_btn
             check_category_status(cat)
             self.update_task_status_label()
 
@@ -1022,11 +1046,14 @@ class StudyGameUI(BaseTk):
                 var = tk.BooleanVar(value=t["done"])
                 font_to_use = self.font_strike if t["done"] else self.font_normal
                 fg_to_use = "gray" if t["done"] else "black"
-                
-                # ✅ 防患未然：打卡看板的复选框也加入了 wraplength，防止长文本越界截断
-                cb = tk.Checkbutton(cat_frame, text=t["text"], variable=var, font=font_to_use, fg=fg_to_use, bg="white", activebackground="white", selectcolor="#E0FFFF", justify=tk.LEFT, anchor="w", wraplength=280, command=lambda c=cat, idx=i: toggle_task(c, idx))
-                cb.pack(anchor="w", padx=25, pady=2)
+                row = tk.Frame(cat_frame, bg="white")
+                row.pack(anchor="w", padx=20, pady=2, fill=tk.X)
+                cb = tk.Checkbutton(row, text=t["text"], variable=var, font=font_to_use, fg=fg_to_use, bg="white", activebackground="white", selectcolor="#E0FFFF", justify=tk.LEFT, anchor="w", wraplength=240, command=lambda c=cat, idx=i: toggle_task(c, idx))
+                cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
+                cancel_btn = tk.Button(row, text="取消", font=("Microsoft YaHei", 8), bg="#FFB6C1", fg="white", bd=0, width=5, state=tk.DISABLED if t["done"] else tk.NORMAL, command=lambda c=cat, idx=i: self.handle_task_cancel(c, idx, viewer))
+                cancel_btn.pack(side=tk.RIGHT, padx=(6, 0))
                 self.task_cbs[(cat, i)] = (var, cb)
+                self.task_cancel_btns[(cat, i)] = cancel_btn
 
             if global_data.get("today_task_submitted"):
                 add_frame = tk.Frame(cat_frame, bg="white")
@@ -1665,27 +1692,206 @@ class StudyGameUI(BaseTk):
             if log_type == "task_update": f.write(f"\n{'='*40}\n日期: {today}\n【每日任务设定】\n{content}\n")
             elif log_type == "pomodoro": f.write(f"{content}")
             elif log_type == "review": f.write(f"{content}")
+            elif log_type == "task_cancel": f.write(f"{content}")
+            elif log_type == "task_time": f.write(f"{content}")
+
+    def reset_cancel_counter_if_needed(self):
+        month_key = datetime.now().strftime("%Y-%m")
+        if app_config.get("cancel_month") != month_key:
+            app_config["cancel_month"] = month_key
+            app_config["cancel_count"] = 0
+            save_app_config()
+
+    def get_cancel_penalty_info(self):
+        self.reset_cancel_counter_if_needed()
+        count = int(app_config.get("cancel_count", 0))
+        penalty = 20 * (2 ** count)
+        return count, penalty
+
+    def prompt_cancel_reason(self, cat, text, count, penalty):
+        dialog = tk.Toplevel(self)
+        dialog.title("取消任务")
+        dialog.geometry("420x260")
+        dialog.configure(bg="#FFF0F5")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        info = (
+            f"任务: <{cat}>-{text}\n"
+            f"本月已使用 {count} 次取消机会\n"
+            f"若本次取消将扣除 {penalty} 分"
+        )
+        tk.Label(dialog, text=info, bg="#FFF0F5", justify=tk.LEFT, font=("Microsoft YaHei", 9)).pack(anchor="w", padx=16, pady=(12, 6))
+
+        tk.Label(dialog, text="请输入取消原因:", bg="#FFF0F5", font=("Microsoft YaHei", 9, "bold")).pack(anchor="w", padx=16)
+        reason_text = tk.Text(dialog, height=5, font=("Microsoft YaHei", 9), wrap="word")
+        reason_text.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 8))
+
+        result = {"reason": ""}
+
+        def confirm():
+            reason = reason_text.get("1.0", tk.END).strip()
+            if not reason:
+                messagebox.showwarning("需要原因", "请填写取消原因。", parent=dialog)
+                return
+            result["reason"] = reason
+            dialog.destroy()
+
+        btn_frame = tk.Frame(dialog, bg="#FFF0F5")
+        btn_frame.pack(fill=tk.X, padx=16, pady=(0, 12))
+        tk.Button(btn_frame, text="取消", bg="#CCCCCC", fg="black", width=8, command=dialog.destroy).pack(side=tk.RIGHT, padx=(6, 0))
+        tk.Button(btn_frame, text="确认", bg="#FFB6C1", fg="white", width=8, command=confirm).pack(side=tk.RIGHT)
+
+        self.wait_window(dialog)
+        return result["reason"] or None
+
+    def handle_task_cancel(self, cat, idx, viewer=None):
+        if global_data.get("total_points", 0) < 0:
+            messagebox.showwarning("无法取消", "当前积分为负，禁止取消任务。")
+            return
+        tasks = global_data.get("today_structured_tasks", {}).get(cat, [])
+        if idx < 0 or idx >= len(tasks):
+            return
+        if tasks[idx].get("done"):
+            messagebox.showwarning("无法取消", "已完成任务不能取消。")
+            return
+
+        count, penalty = self.get_cancel_penalty_info()
+        reason = self.prompt_cancel_reason(cat, tasks[idx].get("text", ""), count, penalty)
+        if not reason:
+            return
+
+        text = tasks[idx].get("text", "")
+        del tasks[idx]
+        global_data["total_points"] = global_data.get("total_points", 0) - penalty
+        app_config["cancel_count"] = count + 1
+        save_app_config()
+        save_data()
+
+        log_text = (
+            f"【任务取消】\n"
+            f"日期: {datetime.now().strftime('%Y-%m-%d')}\n"
+            f"任务: <{cat}>-{text}\n"
+            f"原因: {reason}\n"
+            f"本月已使用 {count + 1} 次，扣除 {penalty} 分\n"
+            f"{'='*40}\n"
+        )
+        self.log_to_txt("task_cancel", log_text)
+
+        self.update_dashboard()
+        self.update_task_status_label()
+
+        if viewer is not None:
+            viewer.destroy()
+            self.open_task_viewer()
+
+    def get_focus_minutes_by_task(self, date_str):
+        totals = {}
+        for item in global_data.get("focus_logs", []):
+            start_str = item.get("start", "")
+            end_str = item.get("end", "")
+            if not start_str.startswith(date_str):
+                continue
+            try:
+                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M")
+            except Exception:
+                continue
+            mins = (end_dt - start_dt).total_seconds() / 60.0
+            if mins <= 0:
+                continue
+            key = (item.get("category", ""), item.get("task", ""))
+            totals[key] = totals.get(key, 0) + mins
+        return totals
+
+    def log_daily_task_time(self, date_str, tasks_snapshot):
+        totals = self.get_focus_minutes_by_task(date_str)
+        lines = []
+        for cat in TASK_CATS:
+            tasks = tasks_snapshot.get(cat, [])
+            if not tasks:
+                continue
+            lines.append(f"[{cat}]")
+            for t in tasks:
+                text = t.get("text", "")
+                mins = totals.get((cat, text), 0)
+                lines.append(f"- {text}：{self.format_minutes(mins)}")
+        if not lines:
+            return
+        log_text = (
+            f"【每日任务耗时】\n"
+            f"日期: {date_str}\n"
+            + "\n".join(lines)
+            + f"\n{'='*40}\n"
+        )
+        self.log_to_txt("task_time", log_text)
 
     def change_data_directory(self):
+        self.apply_storage_directory()
+
+    def ensure_storage_directory(self):
+        root_dir = app_config.get("storage_root_dir")
+        if root_dir and os.path.isdir(root_dir):
+            data_dir = os.path.join(root_dir, DATA_FOLDER_NAME)
+            if os.path.isdir(data_dir):
+                app_config["data_dir"] = data_dir
+                app_config["memo_dir"] = data_dir
+                app_config["storage_dir_confirmed"] = True
+                save_app_config()
+                return
+        if root_dir and not os.path.isdir(root_dir):
+            app_config["storage_dir_confirmed"] = False
+            save_app_config()
+        messagebox.showinfo("需要设置目录", "请设置统一的数据存储根目录。\n\n将在该目录下创建或使用【专注改变（个人软件数据）】文件夹。", parent=self)
+        new_root = filedialog.askdirectory(title="请选择统一的数据存储根目录")
+        if not new_root:
+            windows_force_top_alert("必须设置目录", "未选择目录，程序将退出。")
+            sys.exit(0)
+        self.apply_storage_directory(new_root_dir=new_root, show_message=False)
+
+    def apply_storage_directory(self, new_root_dir=None, show_message=True):
         global DATA_FILE_PATH
-        new_dir = filedialog.askdirectory(title="请选择存放数据的文件夹")
-        if not new_dir: return
-        app_config["data_dir"] = os.path.normpath(new_dir)
+        if new_root_dir is None:
+            new_root_dir = filedialog.askdirectory(title="请选择存放数据的文件夹")
+            if not new_root_dir:
+                return
+        new_root_dir = os.path.normpath(new_root_dir)
+        target_data_dir = os.path.join(new_root_dir, DATA_FOLDER_NAME)
+        old_data_dir = app_config.get("data_dir")
+
+        if not os.path.isdir(target_data_dir):
+            if old_data_dir and os.path.isdir(old_data_dir):
+                try:
+                    os.makedirs(new_root_dir, exist_ok=True)
+                    shutil.move(old_data_dir, target_data_dir)
+                except Exception:
+                    os.makedirs(target_data_dir, exist_ok=True)
+            else:
+                os.makedirs(target_data_dir, exist_ok=True)
+
+        app_config["storage_root_dir"] = new_root_dir
+        app_config["data_dir"] = target_data_dir
+        app_config["memo_dir"] = target_data_dir
+        app_config["storage_dir_confirmed"] = True
         save_app_config()
         DATA_FILE_PATH = os.path.join(app_config["data_dir"], DATA_FILE_NAME)
-        save_data()
-        messagebox.showinfo("设置成功", f"未来的打卡数据将存储在：\n{new_dir}")
+        init_data()
+        if hasattr(self, "points_label"):
+            self.update_date_label()
+            self.update_dashboard()
+            self.update_task_buttons()
+            self.update_task_status_label()
+        if show_message:
+            messagebox.showinfo("设置成功", f"未来的数据将存储在：\n{target_data_dir}")
 
     # ====================================
     # ====== 随手记功能 ======
     # ====================================
     def open_memo_window(self):
         if not app_config.get("memo_dir"):
-            messagebox.showinfo("随手记初始化", "检测到您是第一次使用【随手记】功能。\n\n请指定一个文件夹，未来所有的随手记文本、图片和文件都将分门别类地存放在这里。")
-            chosen_dir = tk.filedialog.askdirectory(title="选择随手记主存放目录")
-            if not chosen_dir:
-                return
-            app_config["memo_dir"] = chosen_dir
+            if not app_config.get("data_dir"):
+                self.ensure_storage_directory()
+            app_config["memo_dir"] = app_config["data_dir"]
             save_app_config()
 
         self.memo_win = tk.Toplevel(self)
