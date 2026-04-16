@@ -154,6 +154,8 @@ def init_data():
                 global_data["incentive_claims"] = {"night": "", "noon": ""}
             if "long_term_tasks" not in global_data:
                 global_data["long_term_tasks"] = []
+            if "report_exclusions" not in global_data:
+                global_data["report_exclusions"] = []
 
         if not app_config.get("rewards_history_reset_done"):
             # Only reset once on first migration, not every day
@@ -173,7 +175,8 @@ def init_data():
             "focus_logs": [],
             "today_incentive_pool": 0,
             "incentive_claims": {"night": "", "noon": ""},
-            "long_term_tasks": []
+            "long_term_tasks": [],
+            "report_exclusions": []
         }
         if DATA_FILE_PATH: save_data()
             
@@ -344,6 +347,20 @@ class StudyGameUI(BaseTk):
         by_date = {}
         by_cat = {}
 
+        # 取消勾选“删除表格记录”只影响报表导出：通过排除清单跳过对应记录，不删除看板历史
+        exclusions = global_data.get("report_exclusions", [])
+        excluded_focus = set()
+        excluded_history = set()
+        for ex in exclusions:
+            try:
+                t = ex.get("type")
+                if t == "focus_log":
+                    excluded_focus.add((ex.get("start"), ex.get("end"), ex.get("category"), ex.get("task")))
+                elif t == "study_history":
+                    excluded_history.add((ex.get("date"), ex.get("category"), ex.get("task"), ex.get("study_time")))
+            except Exception:
+                pass
+
         def record(date_str, cat, task, dur):
             if dur <= 0: return
             if date_str not in by_date:
@@ -363,10 +380,13 @@ class StudyGameUI(BaseTk):
         # 1. 提取 study_history (包含 科研/理论 的番茄用时)
         for item in global_data.get("study_history", []):
             try:
-                dt_str = item.get("date", "").split()[0]
-                dur = item.get("duration", 0)
+                dt_full = item.get("date", "")
+                dt_str = dt_full.split()[0]
+                dur = item.get("study_time", item.get("duration", 0))
                 cat = item.get("category", "其他")
                 task = item.get("task", "未知任务")
+                if (dt_full, cat, task, dur) in excluded_history:
+                    continue
                 if len(dt_str) == 10 and dur > 0:
                     record(dt_str, cat, task, dur)
             except Exception:
@@ -379,8 +399,12 @@ class StudyGameUI(BaseTk):
                 if cat in ["科研", "理论/技术"]:
                     continue  # 避免与 study_history 重复计算
                 task = log.get("task", "未知任务")
-                s = datetime.strptime(log["start"], "%Y-%m-%d %H:%M")
-                e = datetime.strptime(log["end"], "%Y-%m-%d %H:%M")
+                start_str = log.get("start")
+                end_str = log.get("end")
+                if (start_str, end_str, cat, task) in excluded_focus:
+                    continue
+                s = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+                e = datetime.strptime(end_str, "%Y-%m-%d %H:%M")
                 dur = int((e - s).total_seconds() / 60)
                 if dur > 0:
                     record(s.strftime("%Y-%m-%d"), cat, task, dur)
@@ -406,6 +430,19 @@ class StudyGameUI(BaseTk):
                     for task, v in tasks:
                         dates_list = sorted(list(v["dates"]))
                         writer.writerow([cat, task, v["dur"], len(dates_list), "、".join(dates_list)])
+
+            # 写入成功：允许下次失败时再次弹窗提示
+            self._report_write_permission_alerted = False
+        except PermissionError as e:
+            print("写入CSV报表失败:", e)
+            if not getattr(self, "_report_write_permission_alerted", False):
+                self._report_write_permission_alerted = True
+                messagebox.showwarning(
+                    "报表写入失败",
+                    "CSV报表正在被占用，无法实时更新。\n\n"
+                    "请关闭正在打开的报表文件（Excel/WPS），再勾选/取消勾选一次即可刷新。",
+                    parent=self,
+                )
         except Exception as e:
             print("写入CSV报表失败:", e)
 
@@ -1157,19 +1194,66 @@ class StudyGameUI(BaseTk):
             
             task_item = global_data["today_structured_tasks"][cat][idx]
             task_text = task_item["text"]
-            
-            if is_done and cat in ["生活", "兴趣爱好"]:
+
+            # 实时同步报表：
+            # - 勾选：如果之前误取消过，则撤回一条“报表排除项”，让记录立刻回到CSV
+            # - 取消勾选：新增一条“报表排除项”，让记录立刻从CSV消失（但不删除历史数据）
+            restored = False
+            if is_done:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                exclusions = global_data.setdefault("report_exclusions", [])
+
+                if cat in ["生活", "兴趣爱好"]:
+                    latest_ex_idx = None
+                    latest_ex_start = None
+                    for i, ex in enumerate(exclusions):
+                        if ex.get("type") != "focus_log":
+                            continue
+                        if ex.get("category") != cat or ex.get("task") != task_text:
+                            continue
+                        s = ex.get("start", "")
+                        if not s.startswith(today_str):
+                            continue
+                        if latest_ex_start is None or s > latest_ex_start:
+                            latest_ex_start = s
+                            latest_ex_idx = i
+                    if latest_ex_idx is not None:
+                        del exclusions[latest_ex_idx]
+                        restored = True
+
+                if cat in ["科研", "理论/技术"] and not restored:
+                    latest_ex_idx = None
+                    latest_ex_date = None
+                    for i, ex in enumerate(exclusions):
+                        if ex.get("type") != "study_history":
+                            continue
+                        if ex.get("category") != cat or ex.get("task") != task_text:
+                            continue
+                        d = ex.get("date", "")
+                        if not d.startswith(today_str):
+                            continue
+                        if latest_ex_date is None or d > latest_ex_date:
+                            latest_ex_date = d
+                            latest_ex_idx = i
+                    if latest_ex_idx is not None:
+                        del exclusions[latest_ex_idx]
+                        restored = True
+
+            if is_done and (not restored) and cat in ["生活", "兴趣爱好"]:
                 ok = self.collect_manual_focus_time(cat, task_text)
                 if not ok:
                     var.set(False)
                     return
 
-            if is_done and cat in ["科研", "理论/技术"]:
+            if is_done and (not restored) and cat in ["科研", "理论/技术"]:
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                has_time = any(item.get("category") == cat for item in global_data.get("study_history", []) if item["date"].startswith(today_str))
+                has_time = any(
+                    (item.get("category") == cat and item.get("task") == task_text and item.get("date", "").startswith(today_str))
+                    for item in global_data.get("study_history", [])
+                )
                 if not has_time:
                     var.set(False)
-                    messagebox.showwarning("无法打卡", f"⚠️ 缺少番茄钟记录！\n\n 今日尚未进行【{cat}】类的专注计时，请先去首页开启番茄钟完成相关任务。", parent=viewer)
+                    messagebox.showwarning("无法打卡", f"⚠️ 缺少番茄钟记录！\n\n 今日尚未对【{task_text}】产生番茄钟记录，请先在首页选择该任务完成一个番茄钟。", parent=viewer)
                     return
 
             if is_done and (task_text.startswith("（长期）") or task_text.startswith("(长期)")):
@@ -1182,13 +1266,74 @@ class StudyGameUI(BaseTk):
                     messagebox.showwarning("时长不足", f"该长期任务需专注满 {req_time} 分钟！\n当前仅记录了 {int(invested)} 分钟。", parent=viewer)
                     return
             
-            # 如果取消勾选，且是手动记录的时间（生活/兴趣爱好），则把今天这个任 务加上的日志删掉，防止残留
-            if not is_done and cat in ["生活", "兴趣爱好"]:
+            # 如果取消勾选：只从【报表表格】里撤销最近一次记录，不删除看板中的历史记录
+            if not is_done:
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                global_data["focus_logs"] = [
-                    log for log in global_data.get("focus_logs", [])
-                    if not (log.get("category") == cat and log.get("task") == task_text and log.get("start", "").startswith(today_str))
-                ]
+                exclusions = global_data.setdefault("report_exclusions", [])
+
+                excluded_focus = {
+                    (ex.get("start"), ex.get("end"), ex.get("category"), ex.get("task"))
+                    for ex in exclusions
+                    if ex.get("type") == "focus_log"
+                }
+                excluded_history = {
+                    (ex.get("date"), ex.get("category"), ex.get("task"), ex.get("study_time"))
+                    for ex in exclusions
+                    if ex.get("type") == "study_history"
+                }
+
+                # 生活/兴趣：撤销最新一条 focus_logs 记录（仅对报表生效）
+                if cat in ["生活", "兴趣爱好"]:
+                    latest_log = None
+                    latest_start = None
+                    for log in global_data.get("focus_logs", []):
+                        if log.get("category") != cat or log.get("task") != task_text:
+                            continue
+                        start_str = log.get("start", "")
+                        if not start_str.startswith(today_str):
+                            continue
+                        key = (log.get("start"), log.get("end"), log.get("category"), log.get("task"))
+                        if key in excluded_focus:
+                            continue
+                        if latest_start is None or start_str > latest_start:
+                            latest_start = start_str
+                            latest_log = log
+                    if latest_log is not None:
+                        exclusions.append({
+                            "type": "focus_log",
+                            "start": latest_log.get("start"),
+                            "end": latest_log.get("end"),
+                            "category": latest_log.get("category"),
+                            "task": latest_log.get("task"),
+                        })
+
+                # 科研/理论 的番茄：撤销最新一条 study_history 记录（仅对报表生效）
+                if cat in ["科研", "理论/技术"]:
+                    latest_item = None
+                    latest_date = None
+                    latest_dur = None
+                    for item in global_data.get("study_history", []):
+                        if item.get("category") != cat or item.get("task") != task_text:
+                            continue
+                        date_str = item.get("date", "")
+                        if not date_str.startswith(today_str):
+                            continue
+                        dur = item.get("study_time", item.get("duration", 0))
+                        key = (date_str, cat, task_text, dur)
+                        if key in excluded_history:
+                            continue
+                        if latest_date is None or date_str > latest_date:
+                            latest_date = date_str
+                            latest_item = item
+                            latest_dur = dur
+                    if latest_item is not None:
+                        exclusions.append({
+                            "type": "study_history",
+                            "date": latest_item.get("date"),
+                            "study_time": latest_dur,
+                            "category": latest_item.get("category"),
+                            "task": latest_item.get("task"),
+                        })
 
             global_data["today_structured_tasks"][cat][idx]["done"] = is_done
             cb.configure(font=self.font_strike if is_done else self.font_normal, fg="gray" if is_done else "black")
