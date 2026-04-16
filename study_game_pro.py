@@ -152,6 +152,8 @@ def init_data():
                 global_data["today_incentive_pool"] = 0
             if "incentive_claims" not in global_data:
                 global_data["incentive_claims"] = {"night": "", "noon": ""}
+            if "long_term_tasks" not in global_data:
+                global_data["long_term_tasks"] = []
 
         if not app_config.get("rewards_history_reset_done"):
             # Only reset once on first migration, not every day
@@ -170,7 +172,8 @@ def init_data():
             "today_review_text": "", "daily_rewards_history": [], "last_penalty_date": "",
             "focus_logs": [],
             "today_incentive_pool": 0,
-            "incentive_claims": {"night": "", "noon": ""}
+            "incentive_claims": {"night": "", "noon": ""},
+            "long_term_tasks": []
         }
         if DATA_FILE_PATH: save_data()
             
@@ -332,6 +335,80 @@ class StudyGameUI(BaseTk):
         app_config["review_reminder_date"] = today_str
         save_app_config()
 
+    def export_task_reports(self):
+        import csv
+        data_dir = app_config.get("data_dir")
+        if not data_dir or not os.path.exists(data_dir):
+            return
+            
+        by_date = {}
+        by_cat = {}
+
+        def record(date_str, cat, task, dur):
+            if dur <= 0: return
+            if date_str not in by_date:
+                by_date[date_str] = {}
+            k = f"{cat}::{task}"
+            if k not in by_date[date_str]:
+                by_date[date_str][k] = {"cat": cat, "task": task, "dur": 0}
+            by_date[date_str][k]["dur"] += dur
+            
+            if cat not in by_cat:
+                by_cat[cat] = {}
+            if task not in by_cat[cat]:
+                by_cat[cat][task] = {"dates": set(), "dur": 0}
+            by_cat[cat][task]["dates"].add(date_str)
+            by_cat[cat][task]["dur"] += dur
+
+        # 1. 提取 study_history (包含 科研/理论 的番茄用时)
+        for item in global_data.get("study_history", []):
+            try:
+                dt_str = item.get("date", "").split()[0]
+                dur = item.get("duration", 0)
+                cat = item.get("category", "其他")
+                task = item.get("task", "未知任务")
+                if len(dt_str) == 10 and dur > 0:
+                    record(dt_str, cat, task, dur)
+            except Exception:
+                pass
+
+        # 2. 提取 focus_logs (包含 生活/兴趣爱好 的手动记录时间)
+        for log in global_data.get("focus_logs", []):
+            try:
+                cat = log.get("category", "")
+                if cat in ["科研", "理论/技术"]:
+                    continue  # 避免与 study_history 重复计算
+                task = log.get("task", "未知任务")
+                s = datetime.strptime(log["start"], "%Y-%m-%d %H:%M")
+                e = datetime.strptime(log["end"], "%Y-%m-%d %H:%M")
+                dur = int((e - s).total_seconds() / 60)
+                if dur > 0:
+                    record(s.strftime("%Y-%m-%d"), cat, task, dur)
+            except Exception:
+                pass
+
+        try:
+            file_date = os.path.join(data_dir, "任务复盘报表_按日期.csv")
+            with open(file_date, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["日期", "任务分类", "子任务明细", "当日专注时长(分钟)"])
+                for d in sorted(by_date.keys(), reverse=True):
+                    for k, v in by_date[d].items():
+                        writer.writerow([d, v["cat"], v["task"], v["dur"]])
+
+            file_cat = os.path.join(data_dir, "任务复盘报表_按分类汇总.csv")
+            with open(file_cat, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["任务分类", "子任务明细", "总计专注时长(分钟)", "坚持天数", "参与的打卡日期"])
+                for cat in TASK_CATS + [c for c in by_cat.keys() if c not in TASK_CATS]:
+                    if cat not in by_cat: continue
+                    tasks = sorted(by_cat[cat].items(), key=lambda x: x[1]["dur"], reverse=True)
+                    for task, v in tasks:
+                        dates_list = sorted(list(v["dates"]))
+                        writer.writerow([cat, task, v["dur"], len(dates_list), "、".join(dates_list)])
+        except Exception as e:
+            print("写入CSV报表失败:", e)
+
     def handle_new_day_rollover(self, show_popup=False):
         today_str = datetime.now().strftime("%Y-%m-%d")
         today_date = datetime.now().date()
@@ -403,12 +480,36 @@ class StudyGameUI(BaseTk):
             global_data["today_study_time"] = 0
             global_data["today_exchanged_time"] = 0
             global_data["today_incentive_pool"] = 0
-            global_data["today_task_submitted"] = any(carryover_tasks.get(cat) for cat in TASK_CATS)
-            global_data["today_review_submitted"] = False
             global_data["today_structured_tasks"] = carryover_tasks
+            
+            # ====== 注入长期任务 ======
+            month_day = today_date.strftime("%m%d")
+            for lt_task in global_data.get("long_term_tasks", []):
+                try:
+                    start_date = datetime.strptime(lt_task["start_date"], "%Y-%m-%d").date()
+                    end_date = start_date + timedelta(days=lt_task["days"] - 1)
+                    if start_date <= today_date <= end_date:
+                        cat = lt_task["cat"]
+                        formatted_text = f"（长期）{lt_task['text']}（{month_day}）"
+                        exists = any(t['text'] == formatted_text for t in global_data["today_structured_tasks"].get(cat, []))
+                        if not exists:
+                            global_data["today_structured_tasks"].setdefault(cat, []).append({
+                                "text": formatted_text,
+                                "done": False,
+                                "req_time": lt_task["req_time"]
+                            })
+                except Exception as e:
+                    print("解析长期任务失败:", e)
+
+            # 更新 today_task_submitted 状态，以防只有长期任务
+            global_data["today_task_submitted"] = any(global_data["today_structured_tasks"].get(cat) for cat in TASK_CATS)
+
             global_data["today_review_text"] = ""
             global_data["last_checkin_date"] = today_str
             save_data()
+
+        # 每次跨天检查/结算后，都会重新导出一份最新报表
+        self.export_task_reports()
 
         self.update_date_label()
         self.update_dashboard()
@@ -848,6 +949,79 @@ class StudyGameUI(BaseTk):
     # ====================================
     # ====== 新版 Todo 清单编辑器 ======
     # ====================================
+    
+    def add_long_term_task_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("新增长期任务")
+        dialog.geometry("350x300")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        tk.Label(dialog, text="任务名称:").pack(pady=5)
+        name_entry = tk.Entry(dialog, width=30)
+        name_entry.pack()
+
+        tk.Label(dialog, text="所属分类:").pack(pady=5)
+        cat_combo = ttk.Combobox(dialog, values=TASK_CATS, state="readonly", width=28)
+        cat_combo.current(0)
+        cat_combo.pack()
+
+        tk.Label(dialog, text="持续天数 (例如 10):").pack(pady=5)
+        days_entry = tk.Entry(dialog, width=30)
+        days_entry.pack()
+
+        tk.Label(dialog, text="每日需专注分钟数 (例如 30):").pack(pady=5)
+        mins_entry = tk.Entry(dialog, width=30)
+        mins_entry.pack()
+
+        def submit():
+            text = name_entry.get().strip()
+            cat = cat_combo.get()
+            try:
+                days = int(days_entry.get().strip())
+                req_time = int(mins_entry.get().strip())
+            except ValueError:
+                messagebox.showerror("错误", "天数和分钟数必须为整数！", parent=dialog)
+                return
+            
+            if not text:
+                return
+
+            if "long_term_tasks" not in global_data:
+                global_data["long_term_tasks"] = []
+
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            global_data["long_term_tasks"].append({
+                "text": text,
+                "cat": cat,
+                "start_date": today_str,
+                "days": days,
+                "req_time": req_time
+            })
+            
+            # 手动注入今天的任务字典，因为今天已经过了跨天结算
+            month_day = datetime.now().strftime("%m%d")
+            formatted_text = f"（长期）{text}（{month_day}）"
+            exists = any(t['text'] == formatted_text for t in global_data["today_structured_tasks"].get(cat, []))
+            if not exists:
+                global_data["today_structured_tasks"].setdefault(cat, []).append({
+                    "text": formatted_text,
+                    "done": False,
+                    "req_time": req_time
+                })
+            
+            save_data()
+            
+            # 由于可能当前时间界面需要刷新
+            self.handle_new_day_rollover(show_popup=False)
+            messagebox.showinfo("成功", f"长期任务【{text}】已添加！\n\n请重新打开或者刷新【任务打卡看板】即可看到最新任务。", parent=dialog)
+            dialog.destroy()
+            self.update_dashboard()
+            self.update_task_buttons()
+            self.update_task_status_label()
+
+        tk.Button(dialog, text="保存", bg="#90EE90", command=submit).pack(pady=15)
+
     def open_task_editor(self):
         editor = tk.Toplevel(self)
         editor.title("📝 制定今日 Todo 清单")
@@ -923,8 +1097,11 @@ class StudyGameUI(BaseTk):
                 btn_add = tk.Button(add_frame, text="添加", font=("Microsoft YaHei", 9), bg="#87CEFA", fg="white", bd=0, command=lambda c=cat, e=entry: add_task(c, e))
                 btn_add.pack(side=tk.LEFT)
 
+            btn_long_term = tk.Button(scrollable_frame, text="➕ 新增长期任务", bg="#FFD700", fg="black", font=("Microsoft YaHei", 12, "bold"), bd=0, pady=10, command=self.add_long_term_task_dialog)
+            btn_long_term.pack(fill=tk.X, padx=10, pady=(10, 5))
+
             btn_submit = tk.Button(scrollable_frame, text="🚀 完成设定并提交", bg="#32CD32", fg="white", font=("Microsoft YaHei", 12, "bold"), bd=0, pady=10, command=submit_tasks)
-            btn_submit.pack(fill=tk.X, padx=10, pady=(20, 20))
+            btn_submit.pack(fill=tk.X, padx=10, pady=(5, 20))
 
         def add_task(cat, entry_widget):
             text = entry_widget.get().strip()
@@ -978,18 +1155,40 @@ class StudyGameUI(BaseTk):
             var, cb = self.task_cbs[(cat, idx)]
             is_done = var.get()
             
+            task_item = global_data["today_structured_tasks"][cat][idx]
+            task_text = task_item["text"]
+            
+            if is_done and cat in ["生活", "兴趣爱好"]:
+                ok = self.collect_manual_focus_time(cat, task_text)
+                if not ok:
+                    var.set(False)
+                    return
+
             if is_done and cat in ["科研", "理论/技术"]:
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 has_time = any(item.get("category") == cat for item in global_data.get("study_history", []) if item["date"].startswith(today_str))
                 if not has_time:
                     var.set(False)
-                    messagebox.showwarning("无法打卡", f"⚠️ 缺少番茄钟记录！\n\n今日尚未进行【{cat}】类的专注计时，请先去首页开启番茄钟完成相关任务。")
+                    messagebox.showwarning("无法打卡", f"⚠️ 缺少番茄钟记录！\n\n 今日尚未进行【{cat}】类的专注计时，请先去首页开启番茄钟完成相关任务。", parent=viewer)
                     return
-            if is_done and cat in ["生活", "兴趣爱好"]:
-                ok = self.collect_manual_focus_time(cat, global_data["today_structured_tasks"][cat][idx]["text"])
-                if not ok:
+
+            if is_done and (task_text.startswith("（长期）") or task_text.startswith("(长期)")):
+                req_time = task_item.get("req_time", 0)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                totals = self.get_focus_minutes_by_task(today_str)
+                invested = totals.get((cat, task_text), 0)
+                if invested < req_time:
                     var.set(False)
+                    messagebox.showwarning("时长不足", f"该长期任务需专注满 {req_time} 分钟！\n当前仅记录了 {int(invested)} 分钟。", parent=viewer)
                     return
+            
+            # 如果取消勾选，且是手动记录的时间（生活/兴趣爱好），则把今天这个任 务加上的日志删掉，防止残留
+            if not is_done and cat in ["生活", "兴趣爱好"]:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                global_data["focus_logs"] = [
+                    log for log in global_data.get("focus_logs", [])
+                    if not (log.get("category") == cat and log.get("task") == task_text and log.get("start", "").startswith(today_str))
+                ]
 
             global_data["today_structured_tasks"][cat][idx]["done"] = is_done
             cb.configure(font=self.font_strike if is_done else self.font_normal, fg="gray" if is_done else "black")
@@ -999,6 +1198,9 @@ class StudyGameUI(BaseTk):
             check_category_status(cat)
             save_data()
             self.update_task_status_label()
+            
+            # 当消除任务清单上的子任务时(打卡勾选/取消勾选)，动态更新一次报表
+            self.export_task_reports()
 
         def check_category_status(cat):
             items = global_data["today_structured_tasks"].get(cat, [])
@@ -1064,6 +1266,9 @@ class StudyGameUI(BaseTk):
                 btn_add.pack(side=tk.LEFT)
             
             check_category_status(cat)
+
+        btn_long_term_viewer = tk.Button(main_frame, text="➕ 新增长期任务", bg="#FFD700", fg="black", font=("Microsoft YaHei", 10, "bold"), bd=0, pady=8, command=self.add_long_term_task_dialog)
+        btn_long_term_viewer.pack(fill=tk.X, padx=10, pady=(10, 20))
 
     # ====================================
     # ====== 新版番茄钟：绑定任务逻辑 ======
@@ -1244,6 +1449,7 @@ class StudyGameUI(BaseTk):
                 global_data["today_study_time"] += 25
                 global_data["study_history"].append({"date": end_str, "study_time": 25, "category": cat, "task": text})
                 save_data()
+                self.export_task_reports()  # 番茄钟完成记录时间后，也动态刷新表格
                 
                 log_line = f"{start_dt.strftime('%H:%M')} —— {end_dt.strftime('%H:%M')} <{cat}>-{text}\n"
                 self.log_to_txt("pomodoro", log_line)
@@ -1752,6 +1958,12 @@ class StudyGameUI(BaseTk):
         tasks = global_data.get("today_structured_tasks", {}).get(cat, [])
         if idx < 0 or idx >= len(tasks):
             return
+            
+        task_text = tasks[idx].get("text", "")
+        if task_text.startswith("（长期）"):
+            messagebox.showwarning("无法取消", "长期任务只要没有完成，就永远不能删除！")
+            return
+            
         if tasks[idx].get("done"):
             messagebox.showwarning("无法取消", "已完成任务不能取消。")
             return
