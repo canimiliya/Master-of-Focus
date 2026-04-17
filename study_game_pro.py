@@ -237,6 +237,72 @@ def is_workday(date_obj=None):
 
     return target.isoweekday() <= 5
 
+
+def inject_long_term_tasks_for_date(data, target_date):
+    """Ensure long-term tasks for target_date exist in today_structured_tasks.
+
+    Returns True if data was modified.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    changed = False
+    tasks = data.get("today_structured_tasks")
+    if not isinstance(tasks, dict):
+        tasks = {cat: [] for cat in TASK_CATS}
+        data["today_structured_tasks"] = tasks
+        changed = True
+
+    for cat in TASK_CATS:
+        if cat not in tasks or not isinstance(tasks.get(cat), list):
+            tasks[cat] = []
+            changed = True
+
+    month_day = target_date.strftime("%m%d")
+    for lt_task in data.get("long_term_tasks", []) or []:
+        if not isinstance(lt_task, dict):
+            continue
+        try:
+            start_date_str = lt_task.get("start_date", "")
+            if not start_date_str:
+                continue
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+
+            days_raw = lt_task.get("days", 0)
+            days = int(days_raw)
+            if days <= 0:
+                continue
+
+            end_date = start_date + timedelta(days=days - 1)
+            if not (start_date <= target_date <= end_date):
+                continue
+
+            cat = lt_task.get("cat")
+            text = (lt_task.get("text") or "").strip()
+            if not cat or not text:
+                continue
+
+            formatted_text = f"（长期）{text}（{month_day}）"
+            exists = any(t.get("text") == formatted_text for t in tasks.get(cat, []))
+            if exists:
+                continue
+
+            req_time_raw = lt_task.get("req_time", 0)
+            req_time = int(req_time_raw) if str(req_time_raw).strip() else 0
+
+            tasks.setdefault(cat, []).append({
+                "text": formatted_text,
+                "done": False,
+                "req_time": req_time
+            })
+            changed = True
+        except Exception as e:
+            print("解析长期任务失败:", e)
+
+    if changed:
+        data["today_task_submitted"] = any(data.get("today_structured_tasks", {}).get(cat) for cat in TASK_CATS)
+    return changed
+
 # ===================== UI 界面类 =====================
 BaseTk = TkinterDnD.Tk if TK_DND_AVAILABLE else tk.Tk
 
@@ -518,31 +584,16 @@ class StudyGameUI(BaseTk):
             global_data["today_exchanged_time"] = 0
             global_data["today_incentive_pool"] = 0
             global_data["today_structured_tasks"] = carryover_tasks
-            
-            # ====== 注入长期任务 ======
-            month_day = today_date.strftime("%m%d")
-            for lt_task in global_data.get("long_term_tasks", []):
-                try:
-                    start_date = datetime.strptime(lt_task["start_date"], "%Y-%m-%d").date()
-                    end_date = start_date + timedelta(days=lt_task["days"] - 1)
-                    if start_date <= today_date <= end_date:
-                        cat = lt_task["cat"]
-                        formatted_text = f"（长期）{lt_task['text']}（{month_day}）"
-                        exists = any(t['text'] == formatted_text for t in global_data["today_structured_tasks"].get(cat, []))
-                        if not exists:
-                            global_data["today_structured_tasks"].setdefault(cat, []).append({
-                                "text": formatted_text,
-                                "done": False,
-                                "req_time": lt_task["req_time"]
-                            })
-                except Exception as e:
-                    print("解析长期任务失败:", e)
 
-            # 更新 today_task_submitted 状态，以防只有长期任务
-            global_data["today_task_submitted"] = any(global_data["today_structured_tasks"].get(cat) for cat in TASK_CATS)
+            # ====== 注入长期任务（跨天时） ======
+            inject_long_term_tasks_for_date(global_data, today_date)
 
             global_data["today_review_text"] = ""
             global_data["last_checkin_date"] = today_str
+            save_data()
+
+        # 非跨天场景也要兜底注入：避免 last_checkin_date 已是今天时长期任务缺失
+        if inject_long_term_tasks_for_date(global_data, today_date):
             save_data()
 
         # 每次跨天检查/结算后，都会重新导出一份最新报表
@@ -1035,17 +1086,9 @@ class StudyGameUI(BaseTk):
                 "days": days,
                 "req_time": req_time
             })
-            
-            # 手动注入今天的任务字典，因为今天已经过了跨天结算
-            month_day = datetime.now().strftime("%m%d")
-            formatted_text = f"（长期）{text}（{month_day}）"
-            exists = any(t['text'] == formatted_text for t in global_data["today_structured_tasks"].get(cat, []))
-            if not exists:
-                global_data["today_structured_tasks"].setdefault(cat, []).append({
-                    "text": formatted_text,
-                    "done": False,
-                    "req_time": req_time
-                })
+
+            # 立即注入今天的任务字典（即使今天不触发跨天结算，也能出现）
+            inject_long_term_tasks_for_date(global_data, datetime.now().date())
             
             save_data()
             
