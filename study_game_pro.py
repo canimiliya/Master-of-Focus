@@ -324,6 +324,7 @@ class StudyGameUI(BaseTk):
         self.timer_id = None
         self.current_focus_task = None
         self.focus_segment_start_dt = None
+        self.task_viewer_window = None
         self.pending_focus_segments = []
         
         self.font_normal = font.Font(family="Microsoft YaHei", size=10)
@@ -1099,6 +1100,7 @@ class StudyGameUI(BaseTk):
             self.update_dashboard()
             self.update_task_buttons()
             self.update_task_status_label()
+            self.refresh_task_viewer_if_open()
 
         tk.Button(dialog, text="保存", bg="#90EE90", command=submit).pack(pady=15)
 
@@ -1204,11 +1206,31 @@ class StudyGameUI(BaseTk):
     # ====== 新版 Todo 任务打卡看板 ======
     # ====================================
     def open_task_viewer(self):
+        # 若看板已打开：直接置顶（避免多开多个看板窗口）
+        if self.task_viewer_window is not None:
+            try:
+                if self.task_viewer_window.winfo_exists():
+                    self.force_window_front(self.task_viewer_window)
+                    return
+            except Exception:
+                pass
+            self.task_viewer_window = None
+
         viewer = tk.Toplevel(self)
         viewer.title("✅ 今日打卡看板")
         viewer.geometry("420x560")
         viewer.configure(bg="#20B2AA") 
         viewer.transient(self)
+        self.task_viewer_window = viewer
+
+        def _on_close():
+            try:
+                viewer.destroy()
+            finally:
+                if self.task_viewer_window is viewer:
+                    self.task_viewer_window = None
+
+        viewer.protocol("WM_DELETE_WINDOW", _on_close)
 
         container = tk.Frame(viewer, bg="#20B2AA")
         container.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -1457,6 +1479,27 @@ class StudyGameUI(BaseTk):
 
         btn_long_term_viewer = tk.Button(main_frame, text="➕ 新增长期任务", bg="#FFD700", fg="black", font=("Microsoft YaHei", 10, "bold"), bd=0, pady=8, command=self.add_long_term_task_dialog)
         btn_long_term_viewer.pack(fill=tk.X, padx=10, pady=(10, 20))
+
+    def refresh_task_viewer_if_open(self):
+        """If task viewer is open, refresh it to reflect latest tasks."""
+        viewer = self.task_viewer_window
+        if viewer is None:
+            return
+        try:
+            if not viewer.winfo_exists():
+                self.task_viewer_window = None
+                return
+            # 最小实现：销毁并重建看板窗口（等价于“实时刷新”）
+            viewer.destroy()
+        except Exception:
+            pass
+        finally:
+            if self.task_viewer_window is viewer:
+                self.task_viewer_window = None
+        try:
+            self.open_task_viewer()
+        except Exception:
+            pass
 
     # ====================================
     # ====== 新版番茄钟：绑定任务逻辑 ======
