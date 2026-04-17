@@ -821,14 +821,26 @@ class StudyGameUI(BaseTk):
         save_data()
 
     def check_focus_conflict(self, start_dt, end_dt):
-        for item in self.get_today_focus_logs(include_current=True):
+        logs = list(global_data.get("focus_logs", []) or [])
+        if self.timer_running and self.current_stage == "study" and self.current_focus_task and self.focus_segment_start_dt:
+            now_dt = self.normalize_dt(datetime.now())
+            seg_start = self.normalize_dt(self.focus_segment_start_dt)
+            if now_dt > seg_start:
+                logs.append({
+                    "start": seg_start.strftime("%Y-%m-%d %H:%M"),
+                    "end": now_dt.strftime("%Y-%m-%d %H:%M"),
+                    "category": self.current_focus_task["cat"],
+                    "task": self.current_focus_task["text"]
+                })
+
+        for item in logs:
             try:
                 existing_start = datetime.strptime(item["start"], "%Y-%m-%d %H:%M")
                 existing_end = datetime.strptime(item["end"], "%Y-%m-%d %H:%M")
             except Exception:
                 continue
             if start_dt < existing_end and end_dt > existing_start:
-                conflict_range = f"{existing_start.strftime('%H:%M')} —— {existing_end.strftime('%H:%M')}"
+                conflict_range = f"{existing_start.strftime('%m-%d %H:%M')} —— {existing_end.strftime('%m-%d %H:%M')}"
                 conflict_task = f"<{item.get('category', '')}>-{item.get('task', '')}"
                 return conflict_range, conflict_task
         return None, None
@@ -862,6 +874,15 @@ class StudyGameUI(BaseTk):
         start_hour_var, start_min_var = build_row("开始")
         end_hour_var, end_min_var = build_row("结束")
 
+        start_yesterday_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            dialog,
+            text="开始时间是昨天",
+            variable=start_yesterday_var,
+            bg="#FFF0F5",
+            activebackground="#FFF0F5"
+        ).pack(pady=(2, 0))
+
         result = {"ok": False}
 
         def confirm():
@@ -873,20 +894,18 @@ class StudyGameUI(BaseTk):
             eh = int(end_hour_var.get())
             em = int(end_min_var.get() or "0")
 
-            today = datetime.now().strftime("%Y-%m-%d")
-            start_dt = datetime.strptime(f"{today} {sh:02d}:{sm:02d}", "%Y-%m-%d %H:%M")
-            end_dt = datetime.strptime(f"{today} {eh:02d}:{em:02d}", "%Y-%m-%d %H:%M")
+            today_date = datetime.now().date()
+            start_date = today_date - timedelta(days=1) if start_yesterday_var.get() else today_date
+            start_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=sh, minute=sm)
+
+            end_date = start_date
+            if (eh, em) < (sh, sm):
+                end_date = start_date + timedelta(days=1)
+            end_dt = datetime.combine(end_date, datetime.min.time()).replace(hour=eh, minute=em)
+
             now_dt = self.normalize_dt(datetime.now())
-            latest_end = None
-            for item in self.get_today_focus_logs(include_current=True):
-                try:
-                    existing_end = datetime.strptime(item["end"], "%Y-%m-%d %H:%M")
-                except Exception:
-                    continue
-                if latest_end is None or existing_end > latest_end:
-                    latest_end = existing_end
-            if latest_end and start_dt < latest_end:
-                messagebox.showwarning("时间错误", f"开始时间必须晚于已有记录结束时间：{latest_end.strftime('%H:%M')}", parent=dialog)
+            if start_dt > now_dt:
+                messagebox.showwarning("时间错误", "开始时间必须早于当前时间。", parent=dialog)
                 return
             if end_dt > now_dt:
                 messagebox.showwarning("时间错误", "结束时间必须早于当前时间。", parent=dialog)
@@ -1321,7 +1340,7 @@ class StudyGameUI(BaseTk):
                     messagebox.showwarning("无法打卡", f"⚠️ 缺少番茄钟记录！\n\n 今日尚未对【{task_text}】产生番茄钟记录，请先在首页选择该任务完成一个番茄钟。", parent=viewer)
                     return
 
-            if is_done and (task_text.startswith("（长期）") or task_text.startswith("(长期)")):
+            if is_done and cat in ["科研", "理论/技术"] and (task_text.startswith("（长期）") or task_text.startswith("(长期)")):
                 req_time = task_item.get("req_time", 0)
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 totals = self.get_focus_minutes_by_task(today_str)
@@ -1347,7 +1366,7 @@ class StudyGameUI(BaseTk):
                     if ex.get("type") == "study_history"
                 }
 
-                # 生活/兴趣：撤销最新一条 focus_logs 记录（仅对报表生效）
+                # 生活/兴趣：删除最新一条 focus_logs 记录（彻底移除避免冲突）
                 if cat in ["生活", "兴趣爱好"]:
                     latest_log = None
                     latest_start = None
@@ -1355,22 +1374,24 @@ class StudyGameUI(BaseTk):
                         if log.get("category") != cat or log.get("task") != task_text:
                             continue
                         start_str = log.get("start", "")
-                        if not start_str.startswith(today_str):
-                            continue
-                        key = (log.get("start"), log.get("end"), log.get("category"), log.get("task"))
-                        if key in excluded_focus:
-                            continue
                         if latest_start is None or start_str > latest_start:
                             latest_start = start_str
                             latest_log = log
                     if latest_log is not None:
-                        exclusions.append({
-                            "type": "focus_log",
-                            "start": latest_log.get("start"),
-                            "end": latest_log.get("end"),
-                            "category": latest_log.get("category"),
-                            "task": latest_log.get("task"),
-                        })
+                        try:
+                            global_data["focus_logs"].remove(latest_log)
+                        except ValueError:
+                            pass
+                        exclusions[:] = [
+                            ex for ex in exclusions
+                            if not (
+                                ex.get("type") == "focus_log"
+                                and ex.get("start") == latest_log.get("start")
+                                and ex.get("end") == latest_log.get("end")
+                                and ex.get("category") == latest_log.get("category")
+                                and ex.get("task") == latest_log.get("task")
+                            )
+                        ]
 
                 # 科研/理论 的番茄：撤销最新一条 study_history 记录（仅对报表生效）
                 if cat in ["科研", "理论/技术"]:
