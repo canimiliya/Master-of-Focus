@@ -6,7 +6,7 @@ from PySide6 import QtCore, QtWidgets
 
 from sgp_qt_core import global_data, save_data
 from sgp_qt_dialogs import FocusTask, TaskSelectDialog
-from sgp_qt_platform import notify_system
+from sgp_qt_platform import notify_system, windows_force_top_alert
 
 
 class TimerMixin:
@@ -110,6 +110,7 @@ class TimerMixin:
         if self.current_stage == "study":
             msg = "25分钟到了！别学了，快起来活动一下！\n点击软件内弹窗领取积分。"
             notify_system("⏰ 学习结束", msg)
+            windows_force_top_alert("⏰ 学习结束", msg)
 
             QtWidgets.QMessageBox.information(self, "⏰ 学习结束", msg)
             ans = QtWidgets.QMessageBox.question(
@@ -134,7 +135,9 @@ class TimerMixin:
             return
 
         if self.current_stage == "break":
-            notify_system("⏰ 休息结束！", "5分钟休息结束啦！\n准备开启下一个番茄钟吧~")
+            msg = "5分钟休息结束啦！\n准备开启下一个番茄钟吧~"
+            notify_system("⏰ 休息结束！", msg)
+            windows_force_top_alert("⏰ 休息结束！", msg)
             self.timer_running = False
             self.current_stage = ""
             self.btn_tomato.setText("🍅 开始专注 (25分钟)")
@@ -164,26 +167,73 @@ class TimerMixin:
                 }
             )
 
+        segments = list(self.pending_focus_segments)
+
         # Write focus segments to focus_logs (for work log / long-term task timing).
-        for seg in self.pending_focus_segments:
+        for seg in segments:
             try:
                 self.append_focus_log(seg["start"], seg["end"], seg["category"], seg["task"])
             except Exception:
                 pass
         self.pending_focus_segments = []
 
+        def _split_minutes_by_segments(items: list[dict[str, Any]]) -> list[int]:
+            secs_list: list[float] = []
+            for item in items:
+                try:
+                    secs = float((item["end"] - item["start"]).total_seconds())
+                except Exception:
+                    secs = 0.0
+                secs_list.append(max(0.0, secs))
+
+            total_secs = sum(secs_list)
+            if total_secs <= 0:
+                return [0 for _ in secs_list]
+
+            floors = [int(s // 60) for s in secs_list]
+            remainders = [s - (m * 60) for s, m in zip(secs_list, floors)]
+            target_total = int(round(total_secs / 60.0))
+            remainder = target_total - sum(floors)
+
+            if remainder > 0:
+                order = sorted(range(len(remainders)), key=lambda i: remainders[i], reverse=True)
+                for i in order[:remainder]:
+                    floors[i] += 1
+            elif remainder < 0:
+                order = sorted(range(len(remainders)), key=lambda i: remainders[i])
+                for i in order:
+                    if remainder == 0:
+                        break
+                    if floors[i] > 0:
+                        floors[i] -= 1
+                        remainder += 1
+            return floors
+
+        split_minutes = _split_minutes_by_segments(segments)
+
         data["total_points"] = int(data.get("total_points", 0) or 0) + 25
         data["today_tomatoes"] = int(data.get("today_tomatoes", 0) or 0) + 1
-        data["today_study_time"] = int(data.get("today_study_time", 0) or 0) + 25
-        data.setdefault("study_history", []).append(
-            {"date": end_str, "study_time": 25, "category": self.current_focus_task.cat, "task": self.current_focus_task.text}
-        )
+        total_mins = sum(m for m in split_minutes if m > 0)
+        data["today_study_time"] = int(data.get("today_study_time", 0) or 0) + total_mins
+        for seg, mins in zip(segments, split_minutes):
+            if mins <= 0:
+                continue
+            seg_end = seg.get("end")
+            end_stamp = end_str
+            if isinstance(seg_end, datetime):
+                end_stamp = seg_end.strftime("%Y-%m-%d %H:%M:%S")
+            data.setdefault("study_history", []).append(
+                {
+                    "date": end_stamp,
+                    "study_time": mins,
+                    "category": seg.get("category", self.current_focus_task.cat),
+                    "task": seg.get("task", self.current_focus_task.text),
+                }
+            )
         save_data()
         self.export_task_reports()
 
-        start_dt = end_dt - timedelta(minutes=25)
-        log_line = f"{start_dt.strftime('%H:%M')} —— {end_dt.strftime('%H:%M')} <{self.current_focus_task.cat}>-{self.current_focus_task.text}\n"
-        self.log_to_txt("pomodoro", log_line)
+        # Focus segments are already written to the log via append_focus_log.
         self.update_dashboard()
 
     def cancel_timer(self) -> None:

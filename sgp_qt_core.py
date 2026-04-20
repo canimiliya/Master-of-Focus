@@ -109,27 +109,32 @@ def save_data() -> None:
 
 
 def compute_read_pages_from_tree(tree: list[dict[str, Any]] | None) -> int:
-    total = 0
-    for chap in tree or []:
-        if not isinstance(chap, dict):
-            continue
-        sections = chap.get("sections", [])
-        if isinstance(sections, list) and sections:
-            for sec in sections:
-                if not isinstance(sec, dict):
-                    continue
-                if sec.get("done"):
+    def _get_children(node: dict[str, Any]) -> list[dict[str, Any]]:
+        children = node.get("children")
+        if isinstance(children, list) and children:
+            return [c for c in children if isinstance(c, dict)]
+        sections = node.get("sections")
+        if isinstance(sections, list):
+            return [c for c in sections if isinstance(c, dict)]
+        return children if isinstance(children, list) else []
+
+    def _sum_nodes(nodes: list[dict[str, Any]] | None) -> int:
+        total = 0
+        for node in nodes or []:
+            if not isinstance(node, dict):
+                continue
+            children = _get_children(node)
+            if children:
+                total += _sum_nodes(children)
+            else:
+                if node.get("done"):
                     try:
-                        total += int(sec.get("pages_count", 0) or 0)
+                        total += int(node.get("pages_count", 0) or 0)
                     except Exception:
                         pass
-        else:
-            if chap.get("done"):
-                try:
-                    total += int(chap.get("pages_count", 0) or 0)
-                except Exception:
-                    pass
-    return total
+        return total
+
+    return _sum_nodes(tree)
 
 
 def normalize_reading_books(data: dict[str, Any]) -> None:
@@ -154,40 +159,95 @@ def normalize_reading_books(data: dict[str, Any]) -> None:
             info["tree"] = []
             tree = info["tree"]
 
-        for chap in tree:
-            if not isinstance(chap, dict):
-                continue
-            chap.setdefault("title", "")
-            chap.setdefault("start_page", 0)
-            chap.setdefault("pages_count", 0)
-            chap.setdefault("done", False)
-            chap.setdefault("time_spent", 0)
+        def _normalize_node(node: dict[str, Any]) -> None:
+            node.setdefault("title", "")
+            node.setdefault("start_page", 0)
+            node.setdefault("pages_count", 0)
+            node.setdefault("done", False)
+            node.setdefault("time_spent", 0)
 
-            sections = chap.get("sections")
-            if not isinstance(sections, list):
-                chap["sections"] = []
-                sections = chap["sections"]
+            children = node.get("children")
+            sections = node.get("sections")
+            if not isinstance(children, list) or (not children and isinstance(sections, list)):
+                children = sections if isinstance(sections, list) else []
+            node["children"] = children
+            if "sections" in node:
+                node.pop("sections", None)
 
-            for sec in sections:
-                if not isinstance(sec, dict):
-                    continue
-                sec.setdefault("title", "")
-                sec.setdefault("start_page", 0)
-                sec.setdefault("pages_count", 0)
-                sec.setdefault("done", False)
-                sec.setdefault("time_spent", 0)
+            for child in children if isinstance(children, list) else []:
+                if isinstance(child, dict):
+                    _normalize_node(child)
 
-        for chap in tree:
-            sections = chap.get("sections", [])
-            if sections:
-                chap["pages_count"] = sum(
-                    int(sec.get("pages_count", 0) or 0) for sec in sections if isinstance(sec, dict)
+            if children:
+                node["pages_count"] = sum(
+                    int(ch.get("pages_count", 0) or 0) for ch in children if isinstance(ch, dict)
                 )
+
+        for chap in tree:
+            if isinstance(chap, dict):
+                _normalize_node(chap)
 
         info["read_pages"] = compute_read_pages_from_tree(tree)
         total_pages = int(info.get("total_pages", 0) or 0)
         if total_pages and info["read_pages"] > total_pages:
             info["read_pages"] = total_pages
+
+
+def normalize_literature_guides(data: dict[str, Any]) -> None:
+    papers = data.get("reading_papers")
+    if not isinstance(papers, dict):
+        data["reading_papers"] = {}
+        return
+
+    for title, info in list(papers.items()):
+        if not isinstance(info, dict):
+            papers.pop(title, None)
+            continue
+
+        info.setdefault("author", "")
+        info.setdefault("venue", "")
+        info.setdefault("total_hours", 0)
+        info.setdefault("done_hours", 0)
+        info.setdefault("time_spent", 0)
+
+        phases = info.get("phases")
+        if not isinstance(phases, list):
+            info["phases"] = []
+            phases = info["phases"]
+
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            phase.setdefault("phase", "")
+            phase.setdefault("total_hours", 0)
+            phase.setdefault("done", False)
+            phase.setdefault("time_spent", 0)
+
+            tasks = phase.get("tasks")
+            if not isinstance(tasks, list):
+                phase["tasks"] = []
+                tasks = phase["tasks"]
+
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                task.setdefault("title", "")
+                task.setdefault("hours", 0)
+                task.setdefault("done", False)
+                task.setdefault("time_spent", 0)
+
+                subs = task.get("subtasks")
+                if not isinstance(subs, list):
+                    task["subtasks"] = []
+                    subs = task["subtasks"]
+
+                for sub in subs:
+                    if not isinstance(sub, dict):
+                        continue
+                    sub.setdefault("title", "")
+                    sub.setdefault("hours", 0)
+                    sub.setdefault("done", False)
+                    sub.setdefault("time_spent", 0)
 
 
 def init_data() -> dict[str, Any]:
@@ -224,6 +284,7 @@ def init_data() -> dict[str, Any]:
         global_data.setdefault("long_term_tasks", [])
         global_data.setdefault("report_exclusions", [])
         global_data.setdefault("reading_books", {})
+        global_data.setdefault("reading_papers", {})
 
         if not app_config.get("rewards_history_reset_done"):
             app_config["rewards_history_reset_done"] = True
@@ -255,11 +316,13 @@ def init_data() -> dict[str, Any]:
             "long_term_tasks": [],
             "report_exclusions": [],
             "reading_books": {},
+            "reading_papers": {},
         })
         if DATA_FILE_PATH:
             save_data()
 
     normalize_reading_books(global_data)
+    normalize_literature_guides(global_data)
     return global_data
 
 
@@ -388,55 +451,141 @@ def calculate_book_pages(json_data: Any) -> tuple[list[dict[str, Any]], int]:
     if not isinstance(json_data, list):
         raise ValueError("目录 JSON 必须是列表")
 
+    def _has_children(items: list[Any]) -> bool:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("children"), list):
+                return True
+        return False
+
+    has_children = _has_children(json_data)
+
     cleaned: list[dict[str, Any]] = []
     total_pages = 0
-    for item in json_data:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title", "")).strip()
-        if not title:
-            continue
-        page = item.get("page", None)
-        if page is None:
-            continue
-        try:
-            page_num = int(page)
-        except Exception:
-            continue
-        if title == "全书结束":
-            total_pages = max(total_pages, page_num)
-            continue
-        cleaned.append({"title": title, "page": page_num})
+    if not has_children:
+        for item in json_data:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            page = item.get("page", None)
+            if page is None:
+                continue
+            try:
+                page_num = int(page)
+            except Exception:
+                continue
+            if title == "全书结束":
+                total_pages = max(total_pages, page_num)
+                continue
+            cleaned.append({"title": title, "page": page_num})
 
+        if total_pages <= 0:
+            raise ValueError("目录 JSON 缺少“全书结束”页码")
+        if not cleaned:
+            return [], total_pages
+
+        book_tree: list[dict[str, Any]] = []
+        current_chapter: dict[str, Any] | None = None
+        for idx, item in enumerate(cleaned):
+            next_page = cleaned[idx + 1]["page"] if idx + 1 < len(cleaned) else total_pages
+            pages_count = max(0, int(next_page) - int(item["page"]))
+            node_data: dict[str, Any] = {
+                "title": item["title"],
+                "start_page": int(item["page"]),
+                "pages_count": pages_count,
+                "done": False,
+                "time_spent": 0,
+            }
+
+            if "§" in item["title"] and current_chapter is not None:
+                current_chapter["children"].append(node_data)
+            else:
+                current_chapter = dict(node_data)
+                current_chapter["children"] = []
+                book_tree.append(current_chapter)
+
+        for chap in book_tree:
+            if chap.get("children"):
+                chap["pages_count"] = sum(
+                    int(sec.get("pages_count", 0) or 0) for sec in chap["children"] if isinstance(sec, dict)
+                )
+
+        return book_tree, total_pages
+
+    def _build_nodes(items: list[Any]) -> list[dict[str, Any]]:
+        nonlocal total_pages
+        nodes: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            page = item.get("page", None)
+            if page is None:
+                continue
+            try:
+                page_num = int(page)
+            except Exception:
+                continue
+            if title == "全书结束":
+                total_pages = max(total_pages, page_num)
+                continue
+            node: dict[str, Any] = {
+                "title": title,
+                "start_page": page_num,
+                "pages_count": 0,
+                "done": False,
+                "time_spent": 0,
+                "children": [],
+            }
+            children = item.get("children")
+            if isinstance(children, list) and children:
+                node["children"] = _build_nodes(children)
+            nodes.append(node)
+        return nodes
+
+    book_tree = _build_nodes(json_data)
     if total_pages <= 0:
         raise ValueError("目录 JSON 缺少“全书结束”页码")
-    if not cleaned:
+    if not book_tree:
         return [], total_pages
 
-    book_tree: list[dict[str, Any]] = []
-    current_chapter: dict[str, Any] | None = None
-    for idx, item in enumerate(cleaned):
-        next_page = cleaned[idx + 1]["page"] if idx + 1 < len(cleaned) else total_pages
-        pages_count = max(0, int(next_page) - int(item["page"]))
-        node_data: dict[str, Any] = {
-            "title": item["title"],
-            "start_page": int(item["page"]),
-            "pages_count": pages_count,
-            "done": False,
-            "time_spent": 0,
-        }
+    flat_nodes: list[dict[str, Any]] = []
 
-        if "§" in item["title"] and current_chapter is not None:
-            current_chapter["sections"].append(node_data)
-        else:
-            current_chapter = dict(node_data)
-            current_chapter["sections"] = []
-            book_tree.append(current_chapter)
+    def _flatten(nodes: list[dict[str, Any]]) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            flat_nodes.append(node)
+            children = node.get("children")
+            if isinstance(children, list) and children:
+                _flatten(children)
 
-    for chap in book_tree:
-        if chap.get("sections"):
-            chap["pages_count"] = sum(
-                int(sec.get("pages_count", 0) or 0) for sec in chap["sections"] if isinstance(sec, dict)
+    _flatten(book_tree)
+
+    for idx, node in enumerate(flat_nodes):
+        next_page = flat_nodes[idx + 1]["start_page"] if idx + 1 < len(flat_nodes) else total_pages
+        try:
+            node["pages_count"] = max(0, int(next_page) - int(node.get("start_page", 0) or 0))
+        except Exception:
+            node["pages_count"] = 0
+
+    def _rollup_pages(node: dict[str, Any]) -> None:
+        children = node.get("children")
+        if isinstance(children, list) and children:
+            for child in children:
+                if isinstance(child, dict):
+                    _rollup_pages(child)
+            node["pages_count"] = sum(
+                int(ch.get("pages_count", 0) or 0) for ch in children if isinstance(ch, dict)
             )
+
+    for node in book_tree:
+        if isinstance(node, dict):
+            _rollup_pages(node)
 
     return book_tree, total_pages

@@ -78,28 +78,63 @@ class _CandyProgressBar(QtWidgets.QProgressBar):
         painter.drawPath(path)
 
 
+class _LiteratureProgressBar(_CandyProgressBar):
+    def _tone_colors(self) -> tuple[QtGui.QColor, QtGui.QColor, QtGui.QColor]:
+        # Deeper blues as the phase advances.
+        if self._tone == 1:
+            return (QtGui.QColor("#BAE6FD"), QtGui.QColor("#38BDF8"), QtGui.QColor("#0EA5E9"))
+        if self._tone >= 2:
+            return (QtGui.QColor("#7DD3FC"), QtGui.QColor("#0EA5E9"), QtGui.QColor("#0284C7"))
+        return (QtGui.QColor("#E0F2FE"), QtGui.QColor("#7DD3FC"), QtGui.QColor("#38BDF8"))
+
+
 class ReadingMixin:
     def show_reading_json_prompt_help(self) -> None:
         parent = self.reading_window or self
 
         prompt_text = (
-            "你是“目录截图 → 正文目录 JSON”生成器。输入是目录截图（可多张，按目录顺序）。输出必须是可直接保存为 .json 的“纯 JSON 文本”（不要解释、不要 Markdown、不要代码块标记）。\n\n"
-            "输出格式（严格遵守）：\n"
-            "- 顶层：JSON 数组\n"
-            "- 每项：{\"title\": 字符串, \"page\": 整数}\n"
-            "- 必须在最后额外包含：{\"title\":\"全书结束\",\"page\": 正文最后一页页码整数}\n\n"
-            "抽取规则：\n"
-            "1) 按截图从上到下的目录顺序输出，不要自行排序。\n"
-            "2) page：取每行最右侧/最后出现的阿拉伯数字；如果是范围(如 12-15 / 12~15 / 12—15)，取起始页 12；page 必须输出为整数。\n"
-            "3) title：只保留目录文字，去掉点点点/引导符/多余空白/页码。\n\n"
-            "层级规则（用于章节/小节）：\n"
-            "- 章节：title 不含“§”\n"
-            "- 小节：在 title 最前面加“§”，并且小节必须紧跟在所属章节后面出现。\n\n"
-            "正文过滤规则（去掉与正文无关的部分）：\n"
-            "- 若目录中出现明显的“非正文板块”（例如：附录、参考文献/参考资料、索引、致谢、后记、答案/习题答案、解答、解析等），从该条开始及其后全部不输出到 JSON。\n"
-            "- 同时将“全书结束”的 page 设为：该条非正文板块的起始页码 - 1（表示正文结束页）。\n\n"
-            "不确定性处理：\n"
-            "- 如果无法可靠读出某条目页码，或无法确定“正文结束页码”，不要猜；先向用户提问要缺失的页码信息，得到后再输出最终 JSON。\n"
+            "你是“目录截图 → 嵌套正文目录 JSON”生成器。输入是目录截图（可多张，按目录顺序）。输出必须是纯 JSON 文本（不要解释、不要 Markdown、不要代码块标记），格式为嵌套数组。\n\n"
+            "【⚠️ 最高优先级规则：严格正文截断与过滤】\n"
+            "1. 黑名单：`附录`、`参考文献`、`参考资料`、`索引`、`致谢`、`后记`、`习题答案`、`习题`、`练习`、`解答`、`解析`、`附表`。\n"
+            "2. 首次遇到含黑名单词的条目，立即停止提取。该条目本身不输出，之后的所有内容忽略。\n"
+            "3. 全书结束页码 = 被过滤的第一条非正文条目的起始页码 - 1。最后输出 `{\"title\":\"全书结束\",\"page\": 整数}` 作为数组最后一项。\n\n"
+            "【输出格式规范】\n"
+            "- 顶层是一个 JSON 数组，每一项代表一个“章”或独立部分（如前言、安装）。\n"
+            "- 每项的结构：\n"
+            "  {\n"
+            "    \"title\": \"字符串（保留原始序号和文字）\",\n"
+            "    \"page\": 整数（该部分的起始页码）,\n"
+            "    \"children\": [ ... ]   // 可选，存放下一级条目\n"
+            "  }\n"
+            "- 若没有子条目，可以省略 children 或设为空数组。\n"
+            "- 数组最后一项必须是 `{\"title\":\"全书结束\",\"page\": 正文最后一页页码整数}`。\n\n"
+            "【层级判断与嵌套规则】\n"
+            "1. 根据缩进、序号格式（如 X, X.Y, X.Y.Z）或字体粗细判断层级。\n"
+            "2. 顶层：前言、安装、符号、带章节号的一级标题（如“1 引言”、“2 预备知识”）。\n"
+            "3. 第二级：出现在顶层条目下方、且序号为 X.Y 格式（如 2.1）的标题，应放入上一级的 children 数组中。\n"
+            "4. 第三级及更深：序号为 X.Y.Z 或更多级，放入上一级的 children 数组中（支持无限嵌套）。\n"
+            "5. 对于没有明确序号但明显属于某章的小节（如“数据操作”），根据缩进位置归入正确的父级。\n\n"
+            "【抽取与清洗规则】\n"
+            "- 顺序严格按截图从上到下。\n"
+            "- 页码取最右侧阿拉伯数字，范围取起始页。\n"
+            "- 标题清洗：去除引导点和多余空白，保留序号与文字。\n"
+            "- 若无法识别页码或层级，停止并提问：“请提供[条目名称]的准确页码/层级”。\n\n"
+            "【输出示例片段】\n"
+            "[\n"
+            "  {\"title\":\"前言\",\"page\":1},\n"
+            "  {\"title\":\"2 预备知识\",\"page\":39,\n"
+            "   \"children\":[\n"
+            "     {\"title\":\"2.1 数据操作\",\"page\":40,\n"
+            "      \"children\":[\n"
+            "        {\"title\":\"2.1.1 入门\",\"page\":40},\n"
+            "        {\"title\":\"2.1.2 运算符\",\"page\":42}\n"
+            "      ]\n"
+            "     },\n"
+            "     {\"title\":\"2.2 数据预处理\",\"page\":47}\n"
+            "   ]\n"
+            "  },\n"
+            "  {\"title\":\"全书结束\",\"page\":740}\n"
+            "]\n"
         )
 
         dialog = QtWidgets.QDialog(parent)
@@ -130,6 +165,139 @@ class ReadingMixin:
         edit.setReadOnly(True)
         edit.setPlainText(prompt_text)
         root.addWidget(edit, 1)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        btn_copy = QtWidgets.QPushButton("复制提示词")
+        btn_close = QtWidgets.QPushButton("关闭")
+        btns.addWidget(btn_copy)
+        btns.addWidget(btn_close)
+        root.addLayout(btns)
+
+        def copy_prompt() -> None:
+            QtWidgets.QApplication.clipboard().setText(prompt_text)
+            status_label.setText("提示词已复制到剪贴板。")
+
+        btn_copy.clicked.connect(copy_prompt)
+        btn_close.clicked.connect(dialog.accept)
+
+        dialog.exec()
+
+    def show_literature_json_prompt_help(self) -> None:
+        parent = self.reading_window or self
+
+        prompt_text = (
+            "你是“学术论文精读规划生成器”。输入一篇文献内容，输出三阶段精读规划的JSON数组。\n\n"
+            "【三阶段核心产出】\n"
+            "- 泛读：能口头说清问题、方法和流派。\n"
+            "- 半精读：能手写算法伪代码并画数据流图。\n"
+            "- 精读：能用代码复现核心创新点并与论文结果趋势对齐。\n\n"
+            "【输出格式】\n"
+            "[\n"
+            "  {\n"
+            "    \"phase\": \"阶段名称\",\n"
+            "    \"total_hours\": 数字,\n"
+            "    \"tasks\": [\n"
+            "      {\n"
+            "        \"title\": \"任务名\",\n"
+            "        \"hours\": 数字,\n"
+            "        \"subtasks\": [\n"
+            "          {\"title\": \"动作描述（对象+动作+产出）\", \"hours\": 数字}\n"
+            "        ]\n"
+            "      }\n"
+            "    ]\n"
+            "  }\n"
+            "]\n\n"
+            "【动作指令规则】\n"
+            "每个subtask的title必须包含：论文具体元素 + 动作 + 产出物。\n"
+            "动作动词用：写、画、标注、口头复述、手算、敲代码、截图对比。\n"
+            "禁止用：理解、分析、掌握。\n\n"
+            "【各阶段任务设计】\n"
+            "1. 泛读（约2.5h）：提取问题与方案、标注核心图、画方法谱系图、记局限。\n"
+            "2. 半精读（约4.5h）：手写伪代码并标公式出处、画数据流图标维度、手动走查一个简单例子。\n"
+            "3. 精读（约11h）：圈定核心创新点、独立推导关键公式、实现核心模块代码、最小环境验证趋势、迁移思考。\n\n"
+            "【时间估计】\n"
+            "每个subtask 0.3~1.2h，阶段总时向上取整。\n\n"
+            "【输出要求】\n"
+            "只输出纯JSON，无任何解释或代码块标记。\n\n"
+            "【示例输入】\n"
+            "（粘贴论文内容）\n\n"
+            "【示例输出结构】\n"
+            "[\n"
+            "  {\n"
+            "    \"phase\": \"泛读：知道做了什么，属于哪一派\",\n"
+            "    \"total_hours\": 2.5,\n"
+            "    \"tasks\": [\n"
+            "      {\n"
+            "        \"title\": \"提取核心问题与方案\",\n"
+            "        \"hours\": 1.0,\n"
+            "        \"subtasks\": [\n"
+            "          {\"title\": \"在Abstract划出问题和方法句，用自己的话口头复述\", \"hours\": 0.4},\n"
+            "          {\"title\": \"在Fig.1旁标注输入和输出分别是什么\", \"hours\": 0.3},\n"
+            "          {\"title\": \"在Introduction末尾用荧光笔标出三个贡献点\", \"hours\": 0.3}\n"
+            "        ]\n"
+            "      }\n"
+            "    ]\n"
+            "  },\n"
+            "  {\n"
+            "    \"phase\": \"半精读：产出算法伪代码与数据流图\",\n"
+            "    \"total_hours\": 4.5,\n"
+            "    \"tasks\": [\n"
+            "      {\n"
+            "        \"title\": \"手写算法伪代码\",\n"
+            "        \"hours\": 2.0,\n"
+            "        \"subtasks\": [\n"
+            "          {\"title\": \"在笔记本上手写伪代码（用自己的话改写）\", \"hours\": 0.8},\n"
+            "          {\"title\": \"在每行伪代码旁标注对应公式编号\", \"hours\": 0.7}\n"
+            "        ]\n"
+            "      }\n"
+            "    ]\n"
+            "  },\n"
+            "  {\n"
+            "    \"phase\": \"精读：复现核心创新点并验证\",\n"
+            "    \"total_hours\": 11.0,\n"
+            "    \"tasks\": [\n"
+            "      {\n"
+            "        \"title\": \"圈定核心创新范围\",\n"
+            "        \"hours\": 1.0,\n"
+            "        \"subtasks\": [\n"
+            "          {\"title\": \"列出本文区别于baseline的核心创新点\", \"hours\": 0.5}\n"
+            "        ]\n"
+            "      }\n"
+            "    ]\n"
+            "  }\n"
+            "]"
+        )
+
+        dialog = QtWidgets.QDialog(parent)
+        dialog.setWindowTitle("📄 文献导读 → JSON 操作说明")
+        dialog.resize(820, 720)
+        dialog.setModal(True)
+
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        steps = QtWidgets.QLabel(
+            "使用方法：\n"
+            "1) 准备论文全文或详细摘要文本。\n"
+            "2) 把文本 + 下方提示词发给大模型。\n"
+            "3) 让它输出“纯 JSON 文本”，保存为 .json 文件。\n"
+            "4) 回到本窗口：拖拽该 .json 到上方区域，或点击【选择 JSON 文件导入】。"
+        )
+        steps.setWordWrap(True)
+        root.addWidget(steps)
+
+        status_label = QtWidgets.QLabel("提示：点击【复制提示词】后直接粘贴到大模型对话框即可。")
+        status_label.setStyleSheet("color:#666666")
+        status_label.setWordWrap(True)
+        root.addWidget(status_label)
+
+        edit = QtWidgets.QTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlainText(prompt_text)
+        root.addWidget(edit, 1)
+
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
@@ -198,6 +366,16 @@ class ReadingMixin:
             QFrame#ReadingBookCard[tone="3"] { background-color: #FCE7F3; border-color: #F9A8D4; border-left: 10px solid #F472B6; }
             QFrame#ReadingBookCard[complete="true"] { border: 2px solid #22C55E; }
 
+            QFrame#LiteratureCard {
+                background-color: #FFFFFF;
+                border: 1px solid #D0D7DE;
+                border-radius: 12px;
+            }
+            QFrame#LiteratureCard[tone="0"] { background-color: #ECFEFF; border-color: #67E8F9; border-left: 10px solid #22D3EE; }
+            QFrame#LiteratureCard[tone="1"] { background-color: #FFF7ED; border-color: #FDBA74; border-left: 10px solid #FB923C; }
+            QFrame#LiteratureCard[tone="2"] { background-color: #ECFCCB; border-color: #BEF264; border-left: 10px solid #84CC16; }
+            QFrame#LiteratureCard[tone="3"] { background-color: #FCE7F3; border-color: #F9A8D4; border-left: 10px solid #F472B6; }
+
             QToolButton#ReadingBookHeader {
                 padding: 6px 6px;
                 border: none;
@@ -209,6 +387,27 @@ class ReadingMixin:
             QToolButton#ReadingBookHeader[tone="1"] { color: #9A3412; }
             QToolButton#ReadingBookHeader[tone="2"] { color: #166534; }
             QToolButton#ReadingBookHeader[tone="3"] { color: #9D174D; }
+
+            QToolButton#LiteratureHeader {
+                padding: 6px 6px;
+                border: none;
+                text-align: left;
+                font-weight: 600;
+            }
+            QToolButton#LiteratureHeader:hover { background-color: rgba(59,130,246,0.10); border-radius: 6px; }
+            QToolButton#LiteratureHeader[stage="0"] { color: #2563EB; }
+            QToolButton#LiteratureHeader[stage="1"] { color: #1D4ED8; }
+            QToolButton#LiteratureHeader[stage="2"] { color: #1E3A8A; }
+
+            QLabel#LiteratureTitle { font-weight: 600; }
+            QLabel#LiteratureTitle[stage="0"] { color: #2563EB; }
+            QLabel#LiteratureTitle[stage="1"] { color: #1D4ED8; }
+            QLabel#LiteratureTitle[stage="2"] { color: #1E3A8A; }
+            QLabel#LiteratureMeta { color: #4B5563; }
+
+            QLabel#LiteratureStatus[stage="0"] { color: #3B82F6; font-weight: 600; }
+            QLabel#LiteratureStatus[stage="1"] { color: #2563EB; font-weight: 600; }
+            QLabel#LiteratureStatus[stage="2"] { color: #1E3A8A; font-weight: 600; }
 
             QProgressBar { height: 14px; }
 
@@ -235,7 +434,13 @@ class ReadingMixin:
         def _on_finished(_code: int) -> None:
             if self.reading_window is win:
                 self.reading_window = None
-                self.reading_card_container = None
+                self.reading_book_card_container = None
+                self._reading_book_layout = None
+                self._reading_book_scroll = None
+                self.reading_paper_card_container = None
+                self._reading_paper_layout = None
+                self._reading_paper_scroll = None
+                self._reading_card_margin_filter = None
                 self.reading_tree_metas = {}
 
         win.finished.connect(_on_finished)
@@ -244,9 +449,9 @@ class ReadingMixin:
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        class _BookDropLabel(QtWidgets.QLabel):
-            def __init__(self, on_files):
-                super().__init__("📥 将书籍 JSON 文件拖拽到此处导入")
+        class _FileDropLabel(QtWidgets.QLabel):
+            def __init__(self, text: str, on_files):
+                super().__init__(text)
                 self._on_files = on_files
                 self.setAcceptDrops(True)
                 self.setObjectName("ReadingDropArea")
@@ -266,45 +471,115 @@ class ReadingMixin:
                     self._on_files(paths)
                 event.acceptProposedAction()
 
-        def import_paths(paths: list[str]) -> None:
+        def import_book_paths(paths: list[str]) -> None:
             for file_path in paths:
                 if not file_path.lower().endswith(".json"):
                     QtWidgets.QMessageBox.warning(win, "格式错误", "请拖拽标准的 .json 文件！")
                     continue
                 self.open_book_import_dialog(file_path)
 
-        drop_area = _BookDropLabel(import_paths)
-        root.addWidget(drop_area)
+        def import_paper_paths(paths: list[str]) -> None:
+            for file_path in paths:
+                if not file_path.lower().endswith(".json"):
+                    QtWidgets.QMessageBox.warning(win, "格式错误", "请拖拽标准的 .json 文件！")
+                    continue
+                self.open_paper_import_dialog(file_path)
 
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_import = QtWidgets.QPushButton("选择 JSON 文件导入")
-        btn_export = QtWidgets.QPushButton("导出阅读报表")
-        btn_help = QtWidgets.QPushButton("操作说明")
-        btn_row.addWidget(btn_import)
-        btn_row.addWidget(btn_export)
-        btn_row.addWidget(btn_help)
-        btn_row.addStretch(1)
-        root.addLayout(btn_row)
+        tabs = QtWidgets.QTabWidget()
+        root.addWidget(tabs, 1)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        root.addWidget(scroll, 1)
+        book_tab = QtWidgets.QWidget()
+        book_root = QtWidgets.QVBoxLayout(book_tab)
+        book_root.setContentsMargins(0, 0, 0, 0)
+        book_root.setSpacing(10)
 
-        container = QtWidgets.QWidget()
-        container.setStyleSheet("background: transparent;")
-        scroll.setWidget(container)
-        container_layout = QtWidgets.QVBoxLayout(container)
-        container_layout.setContentsMargins(0, 0, 0, 0)
-        container_layout.setSpacing(10)
+        book_drop = _FileDropLabel("📥 将书籍 JSON 文件拖拽到此处导入", import_book_paths)
+        book_root.addWidget(book_drop)
 
-        self.reading_card_container = container
-        self._reading_card_layout = container_layout
+        book_btn_row = QtWidgets.QHBoxLayout()
+        btn_import_book = QtWidgets.QPushButton("选择 JSON 文件导入")
+        btn_export_book = QtWidgets.QPushButton("导出阅读报表")
+        btn_help_book = QtWidgets.QPushButton("操作说明")
+        book_btn_row.addWidget(btn_import_book)
+        book_btn_row.addWidget(btn_export_book)
+        book_btn_row.addWidget(btn_help_book)
+        book_btn_row.addStretch(1)
+        book_root.addLayout(book_btn_row)
+
+        book_scroll = QtWidgets.QScrollArea()
+        book_scroll.setWidgetResizable(True)
+        book_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        book_root.addWidget(book_scroll, 1)
+
+        book_container = QtWidgets.QWidget()
+        book_container.setStyleSheet("background: transparent;")
+        book_scroll.setWidget(book_container)
+        book_container_layout = QtWidgets.QVBoxLayout(book_container)
+        book_container_layout.setContentsMargins(0, 0, 0, 0)
+        book_container_layout.setSpacing(10)
+
+        self.reading_book_card_container = book_container
+        self._reading_book_layout = book_container_layout
+        self._reading_book_scroll = book_scroll
         self.reading_tree_metas = {}
 
-        btn_import.clicked.connect(self.open_book_file_dialog)
-        btn_export.clicked.connect(self.export_reading_report)
-        btn_help.clicked.connect(self.show_reading_json_prompt_help)
+        btn_import_book.clicked.connect(self.open_book_file_dialog)
+        btn_export_book.clicked.connect(self.export_reading_report)
+        btn_help_book.clicked.connect(self.show_reading_json_prompt_help)
+
+        tabs.addTab(book_tab, "书籍阅读")
+
+        paper_tab = QtWidgets.QWidget()
+        paper_root = QtWidgets.QVBoxLayout(paper_tab)
+        paper_root.setContentsMargins(0, 0, 0, 0)
+        paper_root.setSpacing(10)
+
+        paper_drop = _FileDropLabel("📥 将文献导读 JSON 文件拖拽到此处导入", import_paper_paths)
+        paper_root.addWidget(paper_drop)
+
+        paper_btn_row = QtWidgets.QHBoxLayout()
+        btn_import_paper = QtWidgets.QPushButton("选择 JSON 文件导入")
+        btn_help_paper = QtWidgets.QPushButton("操作说明")
+        paper_btn_row.addWidget(btn_import_paper)
+        paper_btn_row.addWidget(btn_help_paper)
+        paper_btn_row.addStretch(1)
+        paper_root.addLayout(paper_btn_row)
+
+        paper_scroll = QtWidgets.QScrollArea()
+        paper_scroll.setWidgetResizable(True)
+        paper_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        paper_root.addWidget(paper_scroll, 1)
+
+        paper_container = QtWidgets.QWidget()
+        paper_container.setStyleSheet("background: transparent;")
+        paper_scroll.setWidget(paper_container)
+        paper_container_layout = QtWidgets.QVBoxLayout(paper_container)
+        paper_container_layout.setContentsMargins(0, 0, 0, 0)
+        paper_container_layout.setSpacing(10)
+
+        self.reading_paper_card_container = paper_container
+        self._reading_paper_layout = paper_container_layout
+        self._reading_paper_scroll = paper_scroll
+
+        class _CardMarginFilter(QtCore.QObject):
+            def __init__(self, callback):
+                super().__init__()
+                self._callback = callback
+
+            def eventFilter(self, obj, event):  # noqa: N802
+                if event.type() == QtCore.QEvent.Type.Resize:
+                    self._callback()
+                return False
+
+        self._reading_card_margin_filter = _CardMarginFilter(self._sync_reading_card_margins)
+        book_scroll.viewport().installEventFilter(self._reading_card_margin_filter)
+        paper_scroll.viewport().installEventFilter(self._reading_card_margin_filter)
+        QtCore.QTimer.singleShot(0, self._sync_reading_card_margins)
+
+        btn_import_paper.clicked.connect(self.open_paper_file_dialog)
+        btn_help_paper.clicked.connect(self.show_literature_json_prompt_help)
+
+        tabs.addTab(paper_tab, "文献导读")
 
         win.show()
         # Ensure the first render happens after Qt processes the show event.
@@ -403,12 +678,192 @@ class ReadingMixin:
         self.refresh_reading_ui()
         return total_pages
 
+    def open_paper_file_dialog(self) -> None:
+        file_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self.reading_window or self,
+            "选择文献导读 JSON 文件",
+            filter="JSON 文件 (*.json)",
+        )
+        if not file_paths:
+            return
+        for file_path in file_paths:
+            self.open_paper_import_dialog(file_path)
+
+    def open_paper_import_dialog(self, file_path: str) -> None:
+        if not os.path.isfile(file_path):
+            QtWidgets.QMessageBox.warning(self.reading_window or self, "文件不存在", "未找到该文件。")
+            return
+
+        parent = self.reading_window or self
+        dialog = QtWidgets.QDialog(parent)
+        dialog.setWindowTitle("📄 导入文献导读")
+        dialog.resize(360, 260)
+        dialog.setModal(True)
+
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(18, 12, 18, 12)
+        root.setSpacing(8)
+
+        entry_title = QtWidgets.QLineEdit()
+        entry_author = QtWidgets.QLineEdit()
+        entry_venue = QtWidgets.QLineEdit()
+        root.addWidget(QtWidgets.QLabel("文献标题 (必填):"))
+        root.addWidget(entry_title)
+        root.addWidget(QtWidgets.QLabel("作者/团队 (选填):"))
+        root.addWidget(entry_author)
+        root.addWidget(QtWidgets.QLabel("会议/期刊/年份 (选填):"))
+        root.addWidget(entry_venue)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        cancel_btn = QtWidgets.QPushButton("取消")
+        ok_btn = QtWidgets.QPushButton("确认导入")
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        root.addLayout(btns)
+
+        def confirm_import() -> None:
+            data = global_data
+            if data is None:
+                return
+            title = entry_title.text().strip()
+            author = entry_author.text().strip()
+            venue = entry_venue.text().strip()
+
+            if not title:
+                QtWidgets.QMessageBox.warning(dialog, "缺少信息", "文献标题是必填项！")
+                return
+
+            papers = data.setdefault("reading_papers", {})
+            if title in papers:
+                ans = QtWidgets.QMessageBox.question(dialog, "覆盖确认", f"已存在《{title}》，是否覆盖？")
+                if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+
+            try:
+                total_hours = self.import_paper_from_json(file_path, title, author, venue)
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(dialog, "解析失败", f"文件解析出错: {e}")
+                return
+
+            QtWidgets.QMessageBox.information(dialog, "成功", f"《{title}》导入成功！共计 {total_hours:.1f} 小时。")
+            dialog.accept()
+
+        ok_btn.clicked.connect(confirm_import)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def import_paper_from_json(self, file_path: str, title: str, author: str, venue: str) -> float:
+        with open(file_path, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
+
+        if not isinstance(json_data, list):
+            raise ValueError("JSON 顶层必须是数组")
+
+        def _coerce_hours(value: Any) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return 0.0
+
+        phases: list[dict[str, Any]] = []
+        total_hours = 0.0
+        for phase in json_data:
+            if not isinstance(phase, dict):
+                continue
+            phase_title = str(phase.get("phase", "") or "").strip()
+            if not phase_title:
+                raise ValueError("阶段名称缺失")
+
+            tasks: list[dict[str, Any]] = []
+            phase_hours = 0.0
+            for task in phase.get("tasks", []) if isinstance(phase.get("tasks"), list) else []:
+                if not isinstance(task, dict):
+                    continue
+                task_title = str(task.get("title", "") or "").strip()
+                if not task_title:
+                    raise ValueError(f"阶段《{phase_title}》中存在空任务标题")
+                subtasks: list[dict[str, Any]] = []
+                task_hours = 0.0
+                for sub in task.get("subtasks", []) if isinstance(task.get("subtasks"), list) else []:
+                    if not isinstance(sub, dict):
+                        continue
+                    sub_title = str(sub.get("title", "") or "").strip()
+                    if not sub_title:
+                        raise ValueError(f"任务《{task_title}》存在空子任务标题")
+                    sub_hours = _coerce_hours(sub.get("hours", 0) or 0)
+                    task_hours += sub_hours
+                    subtasks.append({"title": sub_title, "hours": sub_hours, "done": False, "time_spent": 0})
+
+                task_hours = float(task_hours)
+                tasks.append({"title": task_title, "hours": task_hours, "done": False, "subtasks": subtasks})
+                phase_hours += task_hours
+
+            phase_hours = float(phase_hours)
+            phases.append({"phase": phase_title, "total_hours": phase_hours, "done": False, "tasks": tasks})
+            total_hours += phase_hours
+
+        if not phases:
+            raise ValueError("未找到有效阶段数据")
+
+        data = global_data
+        if data is None:
+            raise RuntimeError("数据未初始化")
+        data.setdefault("reading_papers", {})
+        data["reading_papers"][title] = {
+            "author": author,
+            "venue": venue,
+            "total_hours": total_hours,
+            "done_hours": 0,
+            "phases": phases,
+        }
+        self.sync_literature_progress(data["reading_papers"][title])
+        save_data()
+        self.refresh_reading_ui()
+        return total_hours
+
     def refresh_reading_ui(self) -> None:
+        self._refresh_reading_books_ui()
+        self.refresh_literature_ui()
+
+    def _refresh_reading_books_ui(self) -> None:
         win = self.reading_window
-        container = getattr(self, "reading_card_container", None)
-        layout = getattr(self, "_reading_card_layout", None)
+        container = getattr(self, "reading_book_card_container", None)
+        layout = getattr(self, "_reading_book_layout", None)
         if win is None or container is None or layout is None:
             return
+
+        def delete_book(title: str) -> None:
+            data = global_data
+            if data is None:
+                return
+            books = data.get("reading_books", {})
+            if not isinstance(books, dict) or title not in books:
+                return
+            ans = QtWidgets.QMessageBox.question(
+                win,
+                "确认删除",
+                f"确认删除《{title}》？该书的阅读进度将被移除，且无法恢复。",
+            )
+            if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+
+            books.pop(title, None)
+
+            tasks = data.get("today_structured_tasks", {})
+            if isinstance(tasks, dict):
+                for cat, items in list(tasks.items()):
+                    if not isinstance(items, list):
+                        continue
+                    tasks[cat] = [
+                        t for t in items if not (isinstance(t, dict) and t.get("meta_book") == title)
+                    ]
+
+            save_data()
+            self.update_task_buttons()
+            self.update_task_status_label()
+            self.refresh_task_viewer_if_open()
+            self.refresh_reading_ui()
 
         while layout.count():
             item = layout.takeAt(0)
@@ -459,6 +914,11 @@ class ReadingMixin:
             card.setObjectName("ReadingBookCard")
             card.setProperty("tone", tone)
             card.setProperty("complete", bool(total_pages > 0 and read_pages >= total_pages))
+            card.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            card.setMinimumWidth(0)
             try:
                 card.style().unpolish(card)
                 card.style().polish(card)
@@ -474,8 +934,8 @@ class ReadingMixin:
             header_btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
             header_btn.setText(title_text)
             header_btn.setCheckable(True)
-            header_btn.setChecked(True)
-            header_btn.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+            header_btn.setChecked(False)
+            header_btn.setArrowType(QtCore.Qt.ArrowType.RightArrow)
             header_btn.setFont(self._font(size=11, bold=True))
             header_btn.setProperty("tone", tone)
             try:
@@ -484,10 +944,22 @@ class ReadingMixin:
             except Exception:
                 pass
             header_btn.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Ignored,
                 QtWidgets.QSizePolicy.Policy.Fixed,
             )
-            card_lay.addWidget(header_btn)
+            header_btn.setMinimumWidth(0)
+            header_row = QtWidgets.QWidget()
+            header_row_lay = QtWidgets.QHBoxLayout(header_row)
+            header_row_lay.setContentsMargins(0, 0, 0, 0)
+            header_row_lay.setSpacing(6)
+            header_row_lay.addWidget(header_btn, 1)
+
+            btn_del = QtWidgets.QPushButton("删除")
+            btn_del.setFixedWidth(60)
+            btn_del.clicked.connect(lambda _=False, t=book_title: delete_book(t))
+            header_row_lay.addWidget(btn_del, 0)
+
+            card_lay.addWidget(header_row)
 
             prog = _CandyProgressBar(tone=tone_idx)
             prog.setValue(int(progress_pct))
@@ -504,27 +976,122 @@ class ReadingMixin:
             tree.setHeaderLabels(["目录结构", "页数", "状态"])
             tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
             tree.setAlternatingRowColors(True)
+            tree.setUniformRowHeights(False)
+            tree.setWordWrap(True)
+            tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
             try:
                 hdr = tree.header()
                 hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-                hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-                hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+                hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+                hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+                hdr.setStretchLastSection(False)
             except Exception:
                 pass
+
+            tree.setIndentation(8)
+
+            def _sync_tree_columns(tr: QtWidgets.QTreeWidget = tree) -> None:
+                hdr = tr.header()
+                if hdr is None:
+                    return
+                fm = tr.fontMetrics()
+                hours_w = max(
+                    fm.horizontalAdvance("预计小时"),
+                    fm.horizontalAdvance("88.8h"),
+                ) + 12
+                status_w = max(
+                    fm.horizontalAdvance("状态"),
+                    fm.horizontalAdvance("未完成"),
+                    fm.horizontalAdvance("已完成"),
+                ) + 12
+                viewport = tr.viewport()
+                avail = viewport.width() if viewport is not None else tr.width()
+                col0 = max(180, avail - hours_w - status_w)
+                tr.setColumnWidth(1, hours_w)
+                tr.setColumnWidth(2, status_w)
+                tr.setColumnWidth(0, col0)
+
+            # Make the directory tree grow with its contents, so long catalogs are not clipped by a
+            # fixed viewport height (avoid nested scrolling inside cards).
+            tree.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            tree.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            tree.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+
+            class _TreeResizeFilter(QtCore.QObject):
+                def __init__(self, callback):
+                    super().__init__()
+                    self._callback = callback
+
+                def eventFilter(self, obj, event):  # noqa: N802
+                    if event.type() == QtCore.QEvent.Type.Resize:
+                        self._callback()
+                    return False
+
+            def _calc_tree_height(tr: QtWidgets.QTreeWidget) -> int:
+                header_h = tr.header().sizeHint().height() if tr.header() is not None else 0
+                frame = tr.frameWidth() * 2
+                fallback_h = tr.sizeHintForRow(0)
+                if fallback_h <= 0:
+                    fallback_h = max(18, tr.fontMetrics().height() + 8)
+
+                def _collect_visible(item: QtWidgets.QTreeWidgetItem, bucket: list[QtWidgets.QTreeWidgetItem]) -> None:
+                    bucket.append(item)
+                    if item.isExpanded():
+                        for idx in range(item.childCount()):
+                            child = item.child(idx)
+                            if child is not None:
+                                _collect_visible(child, bucket)
+
+                visible_items: list[QtWidgets.QTreeWidgetItem] = []
+                for i in range(tr.topLevelItemCount()):
+                    top = tr.topLevelItem(i)
+                    if top is not None:
+                        _collect_visible(top, visible_items)
+
+                rows_h = 0
+                for item in visible_items:
+                    idx = tr.indexFromItem(item, 0)
+                    hint = tr.sizeHintForIndex(idx).height() if idx.isValid() else 0
+                    rows_h += hint if hint > 0 else fallback_h
+
+                return header_h + frame + rows_h + 6
+
+            def _sync_tree_height(tr: QtWidgets.QTreeWidget = tree, card_widget: QtWidgets.QWidget = card) -> None:
+                # Debounce: avoid recalculating hundreds of times when expandAll() triggers many signals.
+                if getattr(tr, "_sgp_height_sync_pending", False):
+                    return
+                tr._sgp_height_sync_pending = True  # type: ignore[attr-defined]
+
+                def _apply() -> None:
+                    tr._sgp_height_sync_pending = False  # type: ignore[attr-defined]
+                    h = _calc_tree_height(tr)
+                    tr.setMinimumHeight(h)
+                    tr.setMaximumHeight(h)
+                    card_widget.adjustSize()
+                    if container is not None:
+                        container.adjustSize()
+
+                QtCore.QTimer.singleShot(0, _apply)
             card_lay.addWidget(tree)
 
             def _toggle_tree(expanded: bool, tr: QtWidgets.QTreeWidget = tree, btn: QtWidgets.QToolButton = header_btn) -> None:
                 tr.setVisible(expanded)
                 btn.setArrowType(QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow)
+                if expanded:
+                    _sync_tree_height(tr)
 
             header_btn.toggled.connect(_toggle_tree)
+
+            # Default: collapse the card content (tree hidden).
+            tree.setVisible(False)
+            _toggle_tree(False)
 
             def on_menu(pos: QtCore.QPoint, tr: QtWidgets.QTreeWidget = tree) -> None:
                 item = tr.itemAt(pos)
                 if item is None:
                     return
                 meta = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-                if not isinstance(meta, dict) or meta.get("node_type") == "book":
+                if not isinstance(meta, dict) or meta.get("node_type") != "node":
                     return
                 menu = QtWidgets.QMenu(tr)
                 act_research = menu.addAction("加入今日任务（科研）")
@@ -537,59 +1104,636 @@ class ReadingMixin:
 
             tree.customContextMenuRequested.connect(on_menu)
 
-            for chap in book_info.get("tree", []) or []:
-                if not isinstance(chap, dict):
-                    continue
-                chap_title = str(chap.get("title", "") or "")
-                chap_pages = int(chap.get("pages_count", 0) or 0)
-                chap_done = bool(chap.get("done"))
-                chap_status = "已读" if chap_done else "未读"
-                chap_item = QtWidgets.QTreeWidgetItem([chap_title, f"{chap_pages}页", chap_status])
-                chap_item.setData(
+            def _add_book_node(
+                node: dict[str, Any],
+                parent_item: QtWidgets.QTreeWidgetItem | None,
+                path: list[str],
+            ) -> None:
+                if not isinstance(node, dict):
+                    return
+                title = str(node.get("title", "") or "").strip()
+                if not title:
+                    return
+                children = self._get_book_children(node)
+                pages = int(node.get("pages_count", 0) or 0)
+                done = bool(node.get("done"))
+                status = "已读" if done else "未读"
+
+                item = QtWidgets.QTreeWidgetItem([title, f"{pages}页", status])
+                item.setData(
                     0,
                     QtCore.Qt.ItemDataRole.UserRole,
                     {
-                        "node_type": "chapter",
+                        "node_type": "node",
                         "book": book_title,
-                        "chapter": chap_title,
-                        "pages": chap_pages,
-                        "has_sections": bool(chap.get("sections")),
+                        "path": path,
+                        "pages": pages,
+                        "has_children": bool(children),
+                        "chapter": path[0] if path else "",
+                        "section": path[1] if len(path) > 1 else "",
                     },
                 )
-                set_item_done_style(chap_item, chap_done)
-                tree.addTopLevelItem(chap_item)
-                chap_item.setExpanded(True)
+                set_item_done_style(item, done)
+                if parent_item is None:
+                    tree.addTopLevelItem(item)
+                else:
+                    parent_item.addChild(item)
+                item.setExpanded(False)
 
-                for sec in chap.get("sections", []) or []:
-                    if not isinstance(sec, dict):
+                for child in children:
+                    child_title = str(child.get("title", "") or "").strip()
+                    if not child_title:
                         continue
-                    sec_title = str(sec.get("title", "") or "")
-                    sec_pages = int(sec.get("pages_count", 0) or 0)
-                    sec_done = bool(sec.get("done"))
-                    sec_status = "已读" if sec_done else "未读"
-                    sec_item = QtWidgets.QTreeWidgetItem([sec_title, f"{sec_pages}页", sec_status])
-                    sec_item.setData(
-                        0,
-                        QtCore.Qt.ItemDataRole.UserRole,
-                        {
-                            "node_type": "section",
-                            "book": book_title,
-                            "chapter": chap_title,
-                            "section": sec_title,
-                            "pages": sec_pages,
-                        },
-                    )
-                    set_item_done_style(sec_item, sec_done)
-                    chap_item.addChild(sec_item)
+                    _add_book_node(child, item, path + [child_title])
+
+            for chap in book_info.get("tree", []) or []:
+                if not isinstance(chap, dict):
+                    continue
+                chap_title = str(chap.get("title", "") or "").strip()
+                if not chap_title:
+                    continue
+                _add_book_node(chap, None, [chap_title])
+
+            # Default behavior: keep the catalog collapsed on entry; still auto-fit height when user expands/collapses.
+            tree.itemExpanded.connect(lambda _it, tr=tree: _sync_tree_height(tr))
+            tree.itemCollapsed.connect(lambda _it, tr=tree: _sync_tree_height(tr))
+            tree.viewport().installEventFilter(_TreeResizeFilter(lambda: _sync_tree_height(tree)))
+            _sync_tree_height(tree)
 
             layout.addWidget(card)
 
         layout.addStretch(1)
 
+    def refresh_literature_ui(self) -> None:
+        win = self.reading_window
+        container = getattr(self, "reading_paper_card_container", None)
+        layout = getattr(self, "_reading_paper_layout", None)
+        if win is None or container is None or layout is None:
+            return
+
+        def delete_paper(title: str) -> None:
+            data = global_data
+            if data is None:
+                return
+            papers = data.get("reading_papers", {})
+            if not isinstance(papers, dict) or title not in papers:
+                return
+            ans = QtWidgets.QMessageBox.question(
+                win,
+                "确认删除",
+                f"确认删除《{title}》？该文献导读记录将被移除，且无法恢复。",
+            )
+            if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
+
+            papers.pop(title, None)
+            save_data()
+            self.refresh_literature_ui()
+
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+
+        data = global_data or {}
+        papers = data.get("reading_papers", {})
+        if not isinstance(papers, dict) or not papers:
+            lab = QtWidgets.QLabel("暂无文献导读，请先导入 JSON 规划文件。")
+            lab.setObjectName("ReadingEmptyHint")
+            lab.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(lab)
+            layout.addStretch(1)
+            return
+
+        def set_item_done_style(item: QtWidgets.QTreeWidgetItem, done: bool) -> None:
+            f = self._font(size=9, bold=False)
+            f.setStrikeOut(done)
+            base_color = QtGui.QColor("#6B7280" if done else "#111827")
+            status_color = QtGui.QColor("#16A34A" if done else "#111827")
+            for col in range(3):
+                item.setFont(col, f)
+                item.setForeground(col, QtGui.QBrush(status_color if col == 2 else base_color))
+
+        class _HeaderLabel(QtWidgets.QLabel):
+            def __init__(self, text: str, toggle_btn: QtWidgets.QToolButton):
+                super().__init__(text)
+                self._toggle_btn = toggle_btn
+                self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+            def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+                if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                    self._toggle_btn.toggle()
+                super().mouseReleaseEvent(event)
+
+        for idx, paper_title in enumerate(sorted(papers.keys())):
+            paper_info = papers.get(paper_title)
+            if not isinstance(paper_info, dict):
+                continue
+            self.sync_literature_progress(paper_info)
+
+            total_hours = float(paper_info.get("total_hours", 0) or 0)
+            done_hours = float(paper_info.get("done_hours", 0) or 0)
+            progress_pct = (done_hours / total_hours * 100) if total_hours > 0 else 0
+            time_spent = int(paper_info.get("time_spent", 0) or 0)
+            estimate_text = self.build_literature_estimate_text(paper_info)
+
+            author = str(paper_info.get("author", "") or "").strip()
+            venue = str(paper_info.get("venue", "") or "").strip()
+            info_parts = [p for p in (author, venue) if p]
+            info_text = " / ".join(info_parts)
+
+            status_text, stage_idx = self.get_literature_stage(paper_info)
+            stage = str(stage_idx)
+            tone_idx = int(idx % 4)
+            tone = str(tone_idx)
+
+            card = QtWidgets.QFrame()
+            card.setObjectName("LiteratureCard")
+            card.setProperty("stage", stage)
+            card.setProperty("tone", tone)
+            card.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            card.setMinimumWidth(0)
+            try:
+                card.style().unpolish(card)
+                card.style().polish(card)
+            except Exception:
+                pass
+            card_lay = QtWidgets.QVBoxLayout(card)
+            card_lay.setContentsMargins(10, 8, 10, 10)
+            card_lay.setSpacing(6)
+
+            header_btn = QtWidgets.QToolButton()
+            header_btn.setObjectName("LiteratureHeader")
+            header_btn.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonIconOnly)
+            header_btn.setCheckable(True)
+            header_btn.setChecked(False)
+            header_btn.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+            header_btn.setProperty("stage", stage)
+            try:
+                header_btn.style().unpolish(header_btn)
+                header_btn.style().polish(header_btn)
+            except Exception:
+                pass
+            header_btn.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed,
+                QtWidgets.QSizePolicy.Policy.Fixed,
+            )
+            header_btn.setFixedWidth(24)
+            header_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+            header_row = QtWidgets.QWidget()
+            header_row_lay = QtWidgets.QHBoxLayout(header_row)
+            header_row_lay.setContentsMargins(0, 0, 0, 0)
+            header_row_lay.setSpacing(6)
+
+            title_label = _HeaderLabel(f"📄 {paper_title}", header_btn)
+            title_label.setObjectName("LiteratureTitle")
+            title_label.setProperty("stage", stage)
+            title_label.setFont(self._font(size=11, bold=True))
+            title_label.setWordWrap(True)
+
+            meta_label = None
+            if info_text:
+                meta_label = _HeaderLabel(info_text, header_btn)
+                meta_label.setObjectName("LiteratureMeta")
+                meta_label.setWordWrap(True)
+
+            text_box = QtWidgets.QWidget()
+            text_lay = QtWidgets.QVBoxLayout(text_box)
+            text_lay.setContentsMargins(0, 0, 0, 0)
+            text_lay.setSpacing(2)
+            text_lay.addWidget(title_label)
+            if meta_label is not None:
+                text_lay.addWidget(meta_label)
+
+            header_row_lay.addWidget(header_btn, 0)
+            header_row_lay.addWidget(text_box, 1)
+
+            btn_del = QtWidgets.QPushButton("删除")
+            btn_del.setFixedWidth(60)
+            btn_del.clicked.connect(lambda _=False, t=paper_title: delete_paper(t))
+            header_row_lay.addWidget(btn_del, 0)
+            card_lay.addWidget(header_row)
+
+            prog = _LiteratureProgressBar(tone=stage_idx)
+            prog.setValue(int(progress_pct))
+            card_lay.addWidget(prog)
+
+            card_lay.addWidget(
+                QtWidgets.QLabel(
+                    f"进度: {done_hours:.1f} / {total_hours:.1f} 小时 ({progress_pct:.1f}%)"
+                )
+            )
+            time_label = QtWidgets.QLabel(f"已专注: {self.format_minutes(time_spent)} | {estimate_text}")
+            time_label.setStyleSheet("color:#4B5563")
+            card_lay.addWidget(time_label)
+            status_label = QtWidgets.QLabel(f"当前阶段: {status_text}")
+            status_label.setObjectName("LiteratureStatus")
+            status_label.setProperty("stage", stage)
+            try:
+                status_label.style().unpolish(status_label)
+                status_label.style().polish(status_label)
+            except Exception:
+                pass
+            card_lay.addWidget(status_label)
+
+            tree = QtWidgets.QTreeWidget()
+            tree.setColumnCount(3)
+            tree.setHeaderLabels(["学习任务", "预计小时", "状态"])
+            tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+            tree.setAlternatingRowColors(True)
+            tree.setUniformRowHeights(False)
+            tree.setWordWrap(True)
+            tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+            try:
+                hdr = tree.header()
+                hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+                hdr.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Fixed)
+                hdr.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Fixed)
+                hdr.setStretchLastSection(False)
+            except Exception:
+                pass
+
+            tree.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            tree.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            tree.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+            tree.setIndentation(8)
+
+            def _sync_tree_columns(tr: QtWidgets.QTreeWidget = tree) -> None:
+                hdr = tr.header()
+                if hdr is None:
+                    return
+                fm = tr.fontMetrics()
+                hours_w = max(
+                    fm.horizontalAdvance("预计小时"),
+                    fm.horizontalAdvance("88.8h"),
+                ) + 12
+                status_w = max(
+                    fm.horizontalAdvance("状态"),
+                    fm.horizontalAdvance("未完成"),
+                    fm.horizontalAdvance("已完成"),
+                ) + 12
+                viewport = tr.viewport()
+                avail = viewport.width() if viewport is not None else tr.width()
+                col0 = max(180, avail - hours_w - status_w)
+                tr.setColumnWidth(1, hours_w)
+                tr.setColumnWidth(2, status_w)
+                tr.setColumnWidth(0, col0)
+
+            def _calc_tree_height(tr: QtWidgets.QTreeWidget) -> int:
+                header_h = tr.header().sizeHint().height() if tr.header() is not None else 0
+                frame = tr.frameWidth() * 2
+                fallback_h = tr.sizeHintForRow(0)
+                if fallback_h <= 0:
+                    fallback_h = max(18, tr.fontMetrics().height() + 8)
+
+                def _collect_visible(item: QtWidgets.QTreeWidgetItem, bucket: list[QtWidgets.QTreeWidgetItem]) -> None:
+                    bucket.append(item)
+                    if item.isExpanded():
+                        for idx in range(item.childCount()):
+                            child = item.child(idx)
+                            if child is not None:
+                                _collect_visible(child, bucket)
+
+                visible_items: list[QtWidgets.QTreeWidgetItem] = []
+                for i in range(tr.topLevelItemCount()):
+                    top = tr.topLevelItem(i)
+                    if top is not None:
+                        _collect_visible(top, visible_items)
+
+                rows_h = 0
+                for item in visible_items:
+                    idx = tr.indexFromItem(item, 0)
+                    hint = tr.sizeHintForIndex(idx).height() if idx.isValid() else 0
+                    rows_h += hint if hint > 0 else fallback_h
+
+                return header_h + frame + rows_h + 6
+
+            def _sync_tree_height(tr: QtWidgets.QTreeWidget = tree, card_widget: QtWidgets.QWidget = card) -> None:
+                if getattr(tr, "_sgp_height_sync_pending", False):
+                    return
+                tr._sgp_height_sync_pending = True  # type: ignore[attr-defined]
+
+                def _apply() -> None:
+                    tr._sgp_height_sync_pending = False  # type: ignore[attr-defined]
+                    h = _calc_tree_height(tr)
+                    tr.setMinimumHeight(h)
+                    tr.setMaximumHeight(h)
+                    card_widget.adjustSize()
+                    if container is not None:
+                        container.adjustSize()
+
+                QtCore.QTimer.singleShot(0, _apply)
+
+            def _sync_tree_layout(tr: QtWidgets.QTreeWidget = tree) -> None:
+                _sync_tree_columns(tr)
+                _sync_tree_height(tr)
+
+            card_lay.addWidget(tree)
+
+            def _toggle_tree(expanded: bool, tr: QtWidgets.QTreeWidget = tree, btn: QtWidgets.QToolButton = header_btn) -> None:
+                tr.setVisible(expanded)
+                btn.setArrowType(QtCore.Qt.ArrowType.DownArrow if expanded else QtCore.Qt.ArrowType.RightArrow)
+                if expanded:
+                    _sync_tree_layout(tr)
+
+            header_btn.toggled.connect(_toggle_tree)
+            tree.setVisible(False)
+            _toggle_tree(False)
+
+            def on_menu(pos: QtCore.QPoint, tr: QtWidgets.QTreeWidget = tree) -> None:
+                item = tr.itemAt(pos)
+                if item is None:
+                    return
+                meta = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if not isinstance(meta, dict) or meta.get("node_type") != "subtask":
+                    return
+                menu = QtWidgets.QMenu(tr)
+                act_research = menu.addAction("加入今日任务（科研）")
+                act_theory = menu.addAction("加入今日任务（理论/技术）")
+                chosen = menu.exec(tr.viewport().mapToGlobal(pos))
+                if chosen == act_research:
+                    self.add_literature_task_from_meta(meta, cat="科研")
+                elif chosen == act_theory:
+                    self.add_literature_task_from_meta(meta, cat="理论/技术")
+
+            tree.customContextMenuRequested.connect(on_menu)
+
+            class _TreeResizeFilter(QtCore.QObject):
+                def __init__(self, callback):
+                    super().__init__()
+                    self._callback = callback
+
+                def eventFilter(self, obj, event):  # noqa: N802
+                    if event.type() == QtCore.QEvent.Type.Resize:
+                        self._callback()
+                    return False
+
+            def apply_check_state(meta: dict[str, Any], checked: bool) -> None:
+                phases = paper_info.get("phases", []) if isinstance(paper_info.get("phases"), list) else []
+                p_idx = meta.get("phase_idx")
+                t_idx = meta.get("task_idx")
+                s_idx = meta.get("sub_idx")
+                if not isinstance(p_idx, int) or p_idx < 0 or p_idx >= len(phases):
+                    return
+                phase = phases[p_idx]
+                if not isinstance(phase, dict):
+                    return
+                tasks = phase.get("tasks", []) if isinstance(phase.get("tasks"), list) else []
+
+                if meta.get("node_type") == "phase":
+                    for task in tasks:
+                        if not isinstance(task, dict):
+                            continue
+                        task["done"] = bool(checked)
+                        for sub in task.get("subtasks", []) if isinstance(task.get("subtasks"), list) else []:
+                            if isinstance(sub, dict):
+                                sub["done"] = bool(checked)
+                                if not checked:
+                                    sub["time_spent"] = 0
+                elif meta.get("node_type") == "task":
+                    if not isinstance(t_idx, int) or t_idx < 0 or t_idx >= len(tasks):
+                        return
+                    task = tasks[t_idx]
+                    if not isinstance(task, dict):
+                        return
+                    task["done"] = bool(checked)
+                    for sub in task.get("subtasks", []) if isinstance(task.get("subtasks"), list) else []:
+                        if isinstance(sub, dict):
+                            sub["done"] = bool(checked)
+                            if not checked:
+                                sub["time_spent"] = 0
+                elif meta.get("node_type") == "subtask":
+                    if not isinstance(t_idx, int) or t_idx < 0 or t_idx >= len(tasks):
+                        return
+                    task = tasks[t_idx]
+                    subs = task.get("subtasks", []) if isinstance(task.get("subtasks"), list) else []
+                    if not isinstance(s_idx, int) or s_idx < 0 or s_idx >= len(subs):
+                        return
+                    sub = subs[s_idx]
+                    if isinstance(sub, dict):
+                        sub["done"] = bool(checked)
+                        if not checked:
+                            sub["time_spent"] = 0
+
+            def on_item_changed(item: QtWidgets.QTreeWidgetItem, col: int) -> None:
+                if col != 0:
+                    return
+                meta = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if not isinstance(meta, dict):
+                    return
+                checked = item.checkState(0) == QtCore.Qt.CheckState.Checked
+                apply_check_state(meta, checked)
+                self.sync_literature_progress(paper_info)
+                save_data()
+                self.refresh_literature_ui()
+
+            tree.blockSignals(True)
+            for p_idx, phase in enumerate(paper_info.get("phases", []) or []):
+                if not isinstance(phase, dict):
+                    continue
+                phase_title = str(phase.get("phase", "") or "")
+                phase_hours = float(phase.get("total_hours", 0) or 0)
+                phase_done = bool(phase.get("done"))
+                phase_item = QtWidgets.QTreeWidgetItem([phase_title, f"{phase_hours:.1f}h", "已完成" if phase_done else "未完成"])
+                phase_item.setData(
+                    0,
+                    QtCore.Qt.ItemDataRole.UserRole,
+                    {"node_type": "phase", "phase_idx": p_idx, "paper": paper_title, "phase": phase_title},
+                )
+                phase_item.setFlags(phase_item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                phase_item.setCheckState(0, QtCore.Qt.CheckState.Checked if phase_done else QtCore.Qt.CheckState.Unchecked)
+                set_item_done_style(phase_item, phase_done)
+                tree.addTopLevelItem(phase_item)
+
+                for t_idx, task in enumerate(phase.get("tasks", []) or []):
+                    if not isinstance(task, dict):
+                        continue
+                    task_title = str(task.get("title", "") or "")
+                    task_hours = float(task.get("hours", 0) or 0)
+                    task_done = bool(task.get("done"))
+                    task_item = QtWidgets.QTreeWidgetItem([task_title, f"{task_hours:.1f}h", "已完成" if task_done else "未完成"])
+                    task_item.setData(
+                        0,
+                        QtCore.Qt.ItemDataRole.UserRole,
+                        {
+                            "node_type": "task",
+                            "phase_idx": p_idx,
+                            "task_idx": t_idx,
+                            "paper": paper_title,
+                            "phase": phase_title,
+                            "task": task_title,
+                        },
+                    )
+                    task_item.setFlags(task_item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                    task_item.setCheckState(0, QtCore.Qt.CheckState.Checked if task_done else QtCore.Qt.CheckState.Unchecked)
+                    set_item_done_style(task_item, task_done)
+                    phase_item.addChild(task_item)
+
+                    for s_idx, sub in enumerate(task.get("subtasks", []) or []):
+                        if not isinstance(sub, dict):
+                            continue
+                        sub_title = str(sub.get("title", "") or "")
+                        sub_hours = float(sub.get("hours", 0) or 0)
+                        sub_done = bool(sub.get("done"))
+                        sub_item = QtWidgets.QTreeWidgetItem([sub_title, f"{sub_hours:.1f}h", "已完成" if sub_done else "未完成"])
+                        sub_item.setData(
+                            0,
+                            QtCore.Qt.ItemDataRole.UserRole,
+                            {
+                                "node_type": "subtask",
+                                "phase_idx": p_idx,
+                                "task_idx": t_idx,
+                                "sub_idx": s_idx,
+                                "paper": paper_title,
+                                "phase": phase_title,
+                                "task": task_title,
+                                "subtask": sub_title,
+                                "hours": sub_hours,
+                            },
+                        )
+                        sub_item.setFlags(sub_item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                        sub_item.setCheckState(0, QtCore.Qt.CheckState.Checked if sub_done else QtCore.Qt.CheckState.Unchecked)
+                        set_item_done_style(sub_item, sub_done)
+                        task_item.addChild(sub_item)
+
+                phase_item.setExpanded(False)
+
+            tree.blockSignals(False)
+            tree.itemChanged.connect(on_item_changed)
+            tree.itemExpanded.connect(lambda _it, tr=tree: _sync_tree_layout(tr))
+            tree.itemCollapsed.connect(lambda _it, tr=tree: _sync_tree_layout(tr))
+            tree.viewport().installEventFilter(_TreeResizeFilter(lambda: _sync_tree_layout(tree)))
+            _sync_tree_layout(tree)
+
+            layout.addWidget(card)
+
+        layout.addStretch(1)
+
+    def sync_literature_progress(self, paper_info: dict[str, Any]) -> None:
+        phases = paper_info.get("phases", [])
+        if not isinstance(phases, list):
+            return
+
+        def _coerce_hours(value: Any) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return 0.0
+
+        total = 0.0
+        done = 0.0
+        total_time = 0.0
+        for phase in phases:
+            if not isinstance(phase, dict):
+                continue
+            tasks = phase.get("tasks", []) if isinstance(phase.get("tasks"), list) else []
+            phase_total = 0.0
+            phase_done = True
+            phase_time = 0.0
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                subs = task.get("subtasks", []) if isinstance(task.get("subtasks"), list) else []
+                task_total = 0.0
+                task_done = True
+                task_time = 0.0
+                for sub in subs:
+                    if not isinstance(sub, dict):
+                        continue
+                    hours = _coerce_hours(sub.get("hours", 0) or 0)
+                    sub_time = _coerce_hours(sub.get("time_spent", 0) or 0)
+                    task_total += hours
+                    total += hours
+                    task_time += sub_time
+                    total_time += sub_time
+                    if sub.get("done"):
+                        done += hours
+                    else:
+                        task_done = False
+                task["hours"] = float(task_total)
+                task["done"] = bool(task_done and task_total > 0)
+                task["time_spent"] = float(task_time)
+                phase_total += task_total
+                phase_time += task_time
+                if not task["done"]:
+                    phase_done = False
+            phase["total_hours"] = float(phase_total)
+            phase["done"] = bool(phase_done and phase_total > 0)
+            phase["time_spent"] = float(phase_time)
+
+        paper_info["total_hours"] = float(total)
+        paper_info["done_hours"] = float(done)
+        paper_info["time_spent"] = float(total_time)
+
+    def get_literature_stage(self, paper_info: dict[str, Any]) -> tuple[str, int]:
+        phases = paper_info.get("phases", []) if isinstance(paper_info.get("phases"), list) else []
+        done_flags = [bool(p.get("done")) for p in phases if isinstance(p, dict)]
+        stage = 0
+        if len(done_flags) >= 1 and done_flags[0]:
+            stage = 1
+        if len(done_flags) >= 2 and done_flags[0] and done_flags[1]:
+            stage = 2
+        if len(done_flags) >= 3 and all(done_flags[:3]):
+            stage = 2
+
+        label = "泛读"
+        if stage == 1:
+            label = "半精读"
+        elif stage == 2:
+            label = "精读"
+        if done_flags and all(done_flags):
+            label = "精读（完成）"
+        return label, stage
+
+    def build_literature_estimate_text(self, paper_info: dict[str, Any]) -> str:
+        total_hours = float(paper_info.get("total_hours", 0) or 0)
+        done_hours = float(paper_info.get("done_hours", 0) or 0)
+        time_spent = float(paper_info.get("time_spent", 0) or 0)
+        if total_hours <= 0:
+            return "预计还需: 未知"
+        if done_hours <= 0 or time_spent <= 0:
+            return "预计还需: 请先完成部分子任务以生成预测"
+        remaining = total_hours - done_hours
+        if remaining <= 0:
+            return "预计还需: 已完成"
+        minutes_per_hour = time_spent / max(done_hours, 0.1)
+        estimate = remaining * minutes_per_hour
+        return f"预计还需: {self.format_minutes(estimate)}"
+
+    def _calc_card_side_margin(self, width: int) -> int:
+        return 0
+
+    def _sync_reading_card_margins(self) -> None:
+        layouts = [
+            (getattr(self, "_reading_book_scroll", None), getattr(self, "_reading_book_layout", None)),
+            (getattr(self, "_reading_paper_scroll", None), getattr(self, "_reading_paper_layout", None)),
+        ]
+        for scroll, layout in layouts:
+            if scroll is None or layout is None:
+                continue
+            viewport = scroll.viewport() if hasattr(scroll, "viewport") else None
+            width = viewport.width() if viewport is not None else scroll.width()
+            h_margin = self._calc_card_side_margin(int(width))
+            layout.setContentsMargins(h_margin, 0, h_margin, 0)
+
+    def _get_book_children(self, node: dict[str, Any]) -> list[dict[str, Any]]:
+        children = node.get("children")
+        if isinstance(children, list) and children:
+            return [c for c in children if isinstance(c, dict)]
+        sections = node.get("sections")
+        if isinstance(sections, list):
+            return [c for c in sections if isinstance(c, dict)]
+        return children if isinstance(children, list) else []
+
     def calculate_chapter_time_spent(self, chapter: dict[str, Any]) -> int:
-        sections = chapter.get("sections", []) or []
-        if sections:
-            return sum(int(sec.get("time_spent", 0) or 0) for sec in sections if isinstance(sec, dict))
+        children = self._get_book_children(chapter)
+        if children:
+            return sum(self.calculate_chapter_time_spent(child) for child in children if isinstance(child, dict))
         return int(chapter.get("time_spent", 0) or 0)
 
     def calculate_book_time_spent(self, book_info: dict[str, Any]) -> int:
@@ -618,14 +1762,21 @@ class ReadingMixin:
         tree = book_info.get("tree", [])
         if not isinstance(tree, list):
             return
+
+        def _sync_node(node: dict[str, Any]) -> None:
+            children = self._get_book_children(node)
+            if not children:
+                return
+            for child in children:
+                if isinstance(child, dict):
+                    _sync_node(child)
+            node["done"] = all(ch.get("done") for ch in children if isinstance(ch, dict))
+            node["pages_count"] = sum(int(ch.get("pages_count", 0) or 0) for ch in children if isinstance(ch, dict))
+            node["time_spent"] = sum(int(ch.get("time_spent", 0) or 0) for ch in children if isinstance(ch, dict))
+
         for chap in tree:
-            if not isinstance(chap, dict):
-                continue
-            sections = chap.get("sections", [])
-            if sections:
-                chap["done"] = all(sec.get("done") for sec in sections if isinstance(sec, dict))
-                chap["pages_count"] = sum(int(sec.get("pages_count", 0) or 0) for sec in sections if isinstance(sec, dict))
-                chap["time_spent"] = sum(int(sec.get("time_spent", 0) or 0) for sec in sections if isinstance(sec, dict))
+            if isinstance(chap, dict):
+                _sync_node(chap)
 
         book_info["read_pages"] = compute_read_pages_from_tree(tree)
         book_info["time_spent"] = self.calculate_book_time_spent(book_info)
@@ -686,41 +1837,28 @@ class ReadingMixin:
                     progress_pct = (read_pages / total_pages * 100) if total_pages > 0 else 0
                     book_time = int(book_info.get("time_spent", 0) or 0)
 
-                    for chap in book_info.get("tree", []) or []:
-                        if not isinstance(chap, dict):
-                            continue
-                        chap_title = chap.get("title", "")
-                        chap_pages = int(chap.get("pages_count", 0) or 0)
-                        chap_done = "已读" if chap.get("done") else "未读"
-                        chap_time = self.calculate_chapter_time_spent(chap)
+                    def _write_node_rows(
+                        node: dict[str, Any],
+                        path: list[str],
+                        chapter_meta: dict[str, Any] | None = None,
+                    ) -> None:
+                        if not isinstance(node, dict):
+                            return
+                        title = str(node.get("title", "") or "").strip()
+                        if not title:
+                            return
 
-                        writer.writerow(
-                            [
-                                book_title,
-                                author,
-                                version,
-                                total_pages,
-                                read_pages,
-                                f"{progress_pct:.1f}%",
-                                chap_title,
-                                "",
-                                chap_pages,
-                                "",
-                                chap_done,
-                                "",
-                                chap_time,
-                                "",
-                                book_time,
-                            ]
-                        )
+                        node_pages = int(node.get("pages_count", 0) or 0)
+                        node_done = bool(node.get("done"))
+                        node_time = self.calculate_chapter_time_spent(node)
 
-                        for sec in chap.get("sections", []) or []:
-                            if not isinstance(sec, dict):
-                                continue
-                            sec_title = sec.get("title", "")
-                            sec_pages = int(sec.get("pages_count", 0) or 0)
-                            sec_done = "已读" if sec.get("done") else "未读"
-                            sec_time = int(sec.get("time_spent", 0) or 0)
+                        if chapter_meta is None:
+                            chapter_meta = {
+                                "title": title,
+                                "pages": node_pages,
+                                "done": node_done,
+                                "time": node_time,
+                            }
                             writer.writerow(
                                 [
                                     book_title,
@@ -729,17 +1867,52 @@ class ReadingMixin:
                                     total_pages,
                                     read_pages,
                                     f"{progress_pct:.1f}%",
-                                    chap_title,
-                                    sec_title,
-                                    chap_pages,
-                                    sec_pages,
-                                    chap_done,
-                                    sec_done,
-                                    chap_time,
-                                    sec_time,
+                                    chapter_meta["title"],
+                                    "",
+                                    chapter_meta["pages"],
+                                    "",
+                                    "已读" if chapter_meta["done"] else "未读",
+                                    "",
+                                    chapter_meta["time"],
+                                    "",
                                     book_time,
                                 ]
                             )
+                        else:
+                            section_path = " / ".join(path[1:]) if len(path) > 1 else title
+                            writer.writerow(
+                                [
+                                    book_title,
+                                    author,
+                                    version,
+                                    total_pages,
+                                    read_pages,
+                                    f"{progress_pct:.1f}%",
+                                    chapter_meta["title"],
+                                    section_path,
+                                    chapter_meta["pages"],
+                                    node_pages,
+                                    "已读" if chapter_meta["done"] else "未读",
+                                    "已读" if node_done else "未读",
+                                    chapter_meta["time"],
+                                    node_time,
+                                    book_time,
+                                ]
+                            )
+
+                        for child in self._get_book_children(node):
+                            child_title = str(child.get("title", "") or "").strip()
+                            if not child_title:
+                                continue
+                            _write_node_rows(child, path + [child_title], chapter_meta)
+
+                    for chap in book_info.get("tree", []) or []:
+                        if not isinstance(chap, dict):
+                            continue
+                        chap_title = str(chap.get("title", "") or "").strip()
+                        if not chap_title:
+                            continue
+                        _write_node_rows(chap, [chap_title])
 
             QtWidgets.QMessageBox.information(self.reading_window or self, "导出成功", f"阅读报表已导出到:\n{file_path}")
         except Exception as e:
@@ -750,19 +1923,28 @@ class ReadingMixin:
         if data is None:
             return
         book_title = str(meta.get("book", "") or "")
-        chapter_title = str(meta.get("chapter", "") or "")
-        section_title = str(meta.get("section", "") or "")
         pages = int(meta.get("pages", 0) or 0)
 
-        if not book_title or not chapter_title:
+        path = meta.get("path") if isinstance(meta.get("path"), list) else []
+        if not path:
+            chapter_title = str(meta.get("chapter", "") or "")
+            section_title = str(meta.get("section", "") or "")
+            if chapter_title:
+                path = [chapter_title]
+                if section_title:
+                    path.append(section_title)
+
+        if not book_title or not path:
             return
-        if meta.get("node_type") == "chapter" and meta.get("has_sections"):
-            QtWidgets.QMessageBox.warning(self.reading_window or self, "请选择小节", "该章节包含小节，请在小节上右键加入任务。")
+        if meta.get("has_children"):
+            QtWidgets.QMessageBox.warning(
+                self.reading_window or self,
+                "请选择子条目",
+                "该条目包含子目录，请在最末级条目上右键加入任务。",
+            )
             return
 
-        task_text = f"阅读：{book_title} | {chapter_title}"
-        if section_title:
-            task_text = f"阅读：{book_title} | {chapter_title} / {section_title}"
+        task_text = f"阅读：{book_title} | " + " / ".join(path)
 
         if self.is_duplicate_task_text(task_text):
             QtWidgets.QMessageBox.warning(self.reading_window or self, "重复任务", "该阅读任务已在今日清单中。")
@@ -778,8 +1960,9 @@ class ReadingMixin:
                 "done": False,
                 "req_time": 0,
                 "meta_book": book_title,
-                "meta_chapter": chapter_title,
-                "meta_section": section_title,
+                "meta_path": path,
+                "meta_chapter": path[0] if path else "",
+                "meta_section": path[1] if len(path) > 1 else "",
                 "meta_pages": pages,
             }
         )
@@ -793,6 +1976,51 @@ class ReadingMixin:
         else:
             QtWidgets.QMessageBox.information(self.reading_window or self, "已加入", "阅读任务已加入今日清单，请到【制定每日清单】中提交后使用。")
 
+    def add_literature_task_from_meta(self, meta: dict[str, Any], cat: str | None = None) -> None:
+        data = global_data
+        if data is None:
+            return
+        paper_title = str(meta.get("paper", "") or "")
+        phase_title = str(meta.get("phase", "") or "")
+        task_title = str(meta.get("task", "") or "")
+        sub_title = str(meta.get("subtask", "") or "")
+        hours = float(meta.get("hours", 0) or 0)
+
+        if not paper_title or not sub_title:
+            return
+
+        task_text = f"文献导读：{paper_title} | {phase_title} / {task_title} / {sub_title}"
+
+        if self.is_duplicate_task_text(task_text):
+            QtWidgets.QMessageBox.warning(self.reading_window or self, "重复任务", "该导读任务已在今日清单中。")
+            return
+
+        chosen_cat = str(cat or "科研").strip()
+        if chosen_cat not in ("科研", "理论/技术"):
+            chosen_cat = "科研"
+
+        data.setdefault("today_structured_tasks", {}).setdefault(chosen_cat, []).append(
+            {
+                "text": task_text,
+                "done": False,
+                "req_time": 0,
+                "meta_paper": paper_title,
+                "meta_phase": phase_title,
+                "meta_task": task_title,
+                "meta_subtask": sub_title,
+                "meta_hours": hours,
+            }
+        )
+        save_data()
+        self.update_task_buttons()
+        self.update_task_status_label()
+        self.refresh_task_viewer_if_open()
+
+        if data.get("today_task_submitted"):
+            QtWidgets.QMessageBox.information(self.reading_window or self, "已加入", "导读任务已加入今日清单，可在任务看板中打卡。")
+        else:
+            QtWidgets.QMessageBox.information(self.reading_window or self, "已加入", "导读任务已加入今日清单，请到【制定每日清单】中提交后使用。")
+
     def get_study_minutes_for_task(self, task_text: str) -> int:
         data = global_data or {}
         total = 0
@@ -803,6 +2031,59 @@ class ReadingMixin:
                 continue
             total += int(item.get("study_time", item.get("duration", 0)) or 0)
         return total
+
+    def apply_literature_task_status(self, task_item: dict[str, Any], is_done: bool) -> bool:
+        paper_title = task_item.get("meta_paper")
+        if not paper_title:
+            return False
+
+        data = global_data or {}
+        papers = data.get("reading_papers", {})
+        paper_info = papers.get(paper_title) if isinstance(papers, dict) else None
+        if not isinstance(paper_info, dict):
+            return False
+
+        phase_title = task_item.get("meta_phase") or ""
+        task_title = task_item.get("meta_task") or ""
+        sub_title = task_item.get("meta_subtask") or ""
+        if not task_title or not sub_title:
+            return False
+
+        target_sub: dict[str, Any] | None = None
+        for phase in paper_info.get("phases", []) or []:
+            if not isinstance(phase, dict):
+                continue
+            if phase_title and phase.get("phase") != phase_title:
+                continue
+            for task in phase.get("tasks", []) or []:
+                if not isinstance(task, dict):
+                    continue
+                if task.get("title") != task_title:
+                    continue
+                for sub in task.get("subtasks", []) or []:
+                    if isinstance(sub, dict) and sub.get("title") == sub_title:
+                        target_sub = sub
+                        break
+                if target_sub is not None:
+                    break
+            if target_sub is not None:
+                break
+
+        if target_sub is None:
+            return False
+
+        target_sub["done"] = bool(is_done)
+        if is_done:
+            minutes = self.get_study_minutes_for_task(str(task_item.get("text", "") or ""))
+            if minutes > 0:
+                existing = int(target_sub.get("time_spent", 0) or 0)
+                if minutes > existing:
+                    target_sub["time_spent"] = minutes
+        else:
+            target_sub["time_spent"] = 0
+
+        self.sync_literature_progress(paper_info)
+        return True
 
     def apply_reading_task_status(self, task_item: dict[str, Any], is_done: bool) -> bool:
         book_title = task_item.get("meta_book")
@@ -815,39 +2096,68 @@ class ReadingMixin:
         if not isinstance(book_info, dict):
             return False
 
-        chapter_title = task_item.get("meta_chapter") or ""
-        section_title = task_item.get("meta_section") or ""
-        if not chapter_title:
-            return False
-
-        target_node: dict[str, Any] | None = None
-        for chap in book_info.get("tree", []) or []:
-            if not isinstance(chap, dict):
-                continue
-            if chap.get("title") != chapter_title:
-                continue
+        path = task_item.get("meta_path") if isinstance(task_item.get("meta_path"), list) else []
+        if not path:
+            chapter_title = task_item.get("meta_chapter") or ""
+            section_title = task_item.get("meta_section") or ""
+            if not chapter_title:
+                return False
+            path = [str(chapter_title)]
             if section_title:
-                for sec in chap.get("sections", []) or []:
-                    if isinstance(sec, dict) and sec.get("title") == section_title:
-                        target_node = sec
-                        break
-            else:
-                target_node = chap
-            if target_node is not None:
-                break
+                path.append(str(section_title))
 
+        def _find_node(nodes: list[dict[str, Any]], path_parts: list[str]) -> dict[str, Any] | None:
+            if not path_parts:
+                return None
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                if node.get("title") != path_parts[0]:
+                    continue
+                if len(path_parts) == 1:
+                    return node
+                return _find_node(self._get_book_children(node), path_parts[1:])
+            return None
+
+        target_node = _find_node(book_info.get("tree", []) or [], path)
         if target_node is None:
             return False
 
-        target_node["done"] = bool(is_done)
-        if is_done:
-            minutes = self.get_study_minutes_for_task(str(task_item.get("text", "") or ""))
-            if minutes > 0:
-                existing = int(target_node.get("time_spent", 0) or 0)
+        minutes = self.get_study_minutes_for_task(str(task_item.get("text", "") or ""))
+        children = self._get_book_children(target_node)
+        if children:
+            leaves: list[dict[str, Any]] = []
+
+            def _collect_leaves(node: dict[str, Any]) -> None:
+                kids = self._get_book_children(node)
+                if kids:
+                    for child in kids:
+                        if isinstance(child, dict):
+                            _collect_leaves(child)
+                else:
+                    leaves.append(node)
+
+            _collect_leaves(target_node)
+            if not leaves:
+                return False
+            for leaf in leaves:
+                leaf["done"] = bool(is_done)
+                if not is_done:
+                    leaf["time_spent"] = 0
+            if is_done and minutes > 0:
+                target_leaf = leaves[0]
+                existing = int(target_leaf.get("time_spent", 0) or 0)
                 if minutes > existing:
-                    target_node["time_spent"] = minutes
+                    target_leaf["time_spent"] = minutes
         else:
-            target_node["time_spent"] = 0
+            target_node["done"] = bool(is_done)
+            if is_done:
+                if minutes > 0:
+                    existing = int(target_node.get("time_spent", 0) or 0)
+                    if minutes > existing:
+                        target_node["time_spent"] = minutes
+            else:
+                target_node["time_spent"] = 0
 
         self.sync_reading_book_progress(book_info)
         return True

@@ -471,6 +471,7 @@ class TasksMixin:
             is_done = cb.isChecked()
             task_text = str(task_item.get("text", "") or "")
             today_str = datetime.now().strftime("%Y-%m-%d")
+            manual_logged = False
 
             exclusions = data.setdefault("report_exclusions", [])
             if not isinstance(exclusions, list):
@@ -516,7 +517,7 @@ class TasksMixin:
                         restored = True
 
             if is_done and (not restored) and cat in ("生活", "兴趣爱好"):
-                ok = self.collect_manual_focus_time(cat, task_text)
+                ok, _start_dt, _end_dt = self.collect_manual_focus_time(cat, task_text)
                 if not ok:
                     cb.blockSignals(True)
                     cb.setChecked(False)
@@ -524,38 +525,47 @@ class TasksMixin:
                     return
 
             if is_done and (not restored) and cat in ("科研", "理论/技术"):
-                has_time = any(
+                has_history = any(
                     isinstance(item, dict)
                     and item.get("category") == cat
                     and item.get("task") == task_text
                     and str(item.get("date", "")).startswith(today_str)
                     for item in data.get("study_history", [])
                 )
-                if not has_time:
-                    cb.blockSignals(True)
-                    cb.setChecked(False)
-                    cb.blockSignals(False)
-                    QtWidgets.QMessageBox.warning(
-                        viewer,
-                        "无法打卡",
-                        f"⚠️ 缺少番茄钟记录！\n\n 今日尚未对【{task_text}】产生番茄钟记录，请先在首页选择该任务完成一个番茄钟。",
+                focus_totals = self.get_focus_minutes_by_task(today_str)
+                has_focus = focus_totals.get((cat, task_text), 0) > 0
+                if not (has_history or has_focus):
+                    ok, start_dt, end_dt = self.collect_manual_focus_time(cat, task_text)
+                    if not ok or start_dt is None or end_dt is None:
+                        cb.blockSignals(True)
+                        cb.setChecked(False)
+                        cb.blockSignals(False)
+                        return
+
+                    mins = int((end_dt - start_dt).total_seconds() / 60)
+                    end_str = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    data.setdefault("study_history", []).append(
+                        {"date": end_str, "study_time": mins, "category": cat, "task": task_text}
                     )
-                    return
+                    data["today_study_time"] = int(data.get("today_study_time", 0) or 0) + mins
+                    save_data()
+                    manual_logged = True
 
             if is_done and cat in ("科研", "理论/技术") and (task_text.startswith("（长期）") or task_text.startswith("(长期)")):
-                req_time = int(task_item.get("req_time", 0) or 0)
-                totals = self.get_focus_minutes_by_task(today_str)
-                invested = totals.get((cat, task_text), 0)
-                if invested < req_time:
-                    cb.blockSignals(True)
-                    cb.setChecked(False)
-                    cb.blockSignals(False)
-                    QtWidgets.QMessageBox.warning(
-                        viewer,
-                        "时长不足",
-                        f"该长期任务需专注满 {req_time} 分钟！\n当前仅记录了 {int(invested)} 分钟。",
-                    )
-                    return
+                if not manual_logged:
+                    req_time = int(task_item.get("req_time", 0) or 0)
+                    totals = self.get_focus_minutes_by_task(today_str)
+                    invested = totals.get((cat, task_text), 0)
+                    if invested < req_time:
+                        cb.blockSignals(True)
+                        cb.setChecked(False)
+                        cb.blockSignals(False)
+                        QtWidgets.QMessageBox.warning(
+                            viewer,
+                            "时长不足",
+                            f"该长期任务需专注满 {req_time} 分钟！\n当前仅记录了 {int(invested)} 分钟。",
+                        )
+                        return
 
             if not is_done:
                 if cat in ("生活", "兴趣爱好"):
@@ -626,6 +636,7 @@ class TasksMixin:
 
             data["today_structured_tasks"][cat][idx]["done"] = is_done
             reading_changed = self.apply_reading_task_status(task_item, is_done)
+            literature_changed = self.apply_literature_task_status(task_item, is_done)
 
             cb.setFont(font_strike if is_done else font_normal)
             cb.setStyleSheet("color:gray" if is_done else "color:black")
@@ -635,7 +646,7 @@ class TasksMixin:
             save_data()
             self.update_task_status_label()
             self.export_task_reports()
-            if reading_changed:
+            if reading_changed or literature_changed:
                 self.refresh_reading_ui()
 
         def add_task_in_viewer(cat: str, entry_widget: QtWidgets.QLineEdit) -> None:
