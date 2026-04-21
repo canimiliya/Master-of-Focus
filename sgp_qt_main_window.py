@@ -16,6 +16,7 @@ from sgp_qt_charts import ChartsMixin
 from sgp_qt_exchange import ExchangeMixin
 from sgp_qt_logs import LogsMixin
 from sgp_qt_memo import MemoMixin
+from sgp_qt_pdf2md import Pdf2MdMixin
 from sgp_qt_reading import ReadingMixin
 from sgp_qt_tasks import TasksMixin
 from sgp_qt_timer import TimerMixin
@@ -31,6 +32,7 @@ class StudyGameQt(
     ChartsMixin,
     ExchangeMixin,
     MemoMixin,
+    Pdf2MdMixin,
     QtWidgets.QMainWindow,
 ):
     WIDTH = 780

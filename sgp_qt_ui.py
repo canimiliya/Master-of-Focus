@@ -141,12 +141,14 @@ class UiMixin:
         self.btn_exchange = self._mk_btn("🎮 兑换商店", bg="#98FB98", fg="black")
         self.btn_stats = self._mk_btn("📊 查看高级数据与图表", bg="#DDA0DD", fg="white")
         self.btn_memo = self._mk_btn("💡 随手记 (文件/图文归档)", bg="#FFB6C1", fg="white")
+        self.btn_pdf2md = self._mk_btn("📄 批量翻译 / 文本处理", bg="#20B2AA", fg="white")
         self.btn_work_log = self._mk_btn("📒 今日工作日志", bg="#FFB07C", fg="black")
         self.btn_change_dir = self._mk_btn("📁 更改数据存储目录", bg="#B0C4DE", fg="white")
 
         right_layout.addWidget(self.btn_exchange)
         right_layout.addWidget(self.btn_stats)
         right_layout.addWidget(self.btn_memo)
+        right_layout.addWidget(self.btn_pdf2md)
         right_layout.addWidget(self.btn_work_log)
         right_layout.addWidget(self.btn_change_dir)
 
@@ -166,6 +168,7 @@ class UiMixin:
         self.btn_exchange.clicked.connect(self.open_exchange_shop)
         self.btn_stats.clicked.connect(self.show_charts_window)
         self.btn_memo.clicked.connect(self.open_memo_window)
+        self.btn_pdf2md.clicked.connect(self.open_pdf2md_window)
         self.btn_work_log.clicked.connect(self.open_work_log_window)
 
         self.update_task_buttons()

@@ -14,3 +14,12 @@ ENV/
 .DS_Store
 Thumbs.db
 .vscode/
+.idea/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# PDF2MD output
+pdf2md_output/

@@ -43,6 +43,9 @@ def default_app_config() -> dict[str, Any]:
         "holiday_api_enabled": True,
         "holiday_api_base": "https://timor.tech/api/holiday/info/",
         "holiday_cache": {},
+        "llm_api_key": "",
+        "llm_api_base_url": "https://api.siliconflow.cn/v1",
+        "llm_api_model": "Pro/moonshotai/Kimi-K2.5",
     }
 
 

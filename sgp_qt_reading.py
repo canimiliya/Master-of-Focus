@@ -3,10 +3,18 @@ from datetime import datetime
 from typing import Any
 import json
 import os
+import tempfile
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from sgp_qt_core import app_config, calculate_book_pages, compute_read_pages_from_tree, global_data, save_data
+from sgp_qt_core import app_config, calculate_book_pages, compute_read_pages_from_tree, global_data, save_data, save_app_config
+from sgp_qt_api import (
+    ApiError,
+    classify_file,
+    is_api_configured,
+    smart_import_book,
+    smart_import_paper,
+)
 
 
 class _CandyProgressBar(QtWidgets.QProgressBar):
@@ -88,18 +96,168 @@ class _LiteratureProgressBar(_CandyProgressBar):
         return (QtGui.QColor("#E0F2FE"), QtGui.QColor("#7DD3FC"), QtGui.QColor("#38BDF8"))
 
 
+class StepProgressDialog(QtWidgets.QDialog):
+    _DONE = "\u2713"
+    _BUSY = "\u27f3"
+    _TODO = "\u25cb"
+
+    def __init__(self, title: str, steps: list[str], parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(480)
+        self.setMinimumHeight(350)
+        self._steps = steps
+        self._current = -1
+        self._cancelled = False
+        self._step_labels: list[QtWidgets.QLabel] = []
+        self._step_icons: list[QtWidgets.QLabel] = []
+        self._streaming_shown = False
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(24, 16, 24, 12)
+        root.setSpacing(6)
+
+        for i, text in enumerate(self._steps):
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(10)
+
+            icon_lbl = QtWidgets.QLabel(self._TODO)
+            icon_lbl.setFixedWidth(24)
+            icon_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            font = icon_lbl.font()
+            font.setPointSize(13)
+            icon_lbl.setFont(font)
+            icon_lbl.setStyleSheet("color:#9CA3AF;")
+            self._step_icons.append(icon_lbl)
+
+            lbl = QtWidgets.QLabel(text)
+            lbl.setStyleSheet("color:#9CA3AF; font-size:13px;")
+            self._step_labels.append(lbl)
+
+            row.addWidget(icon_lbl)
+            row.addWidget(lbl, 1)
+            root.addLayout(row)
+
+        root.addSpacing(8)
+
+        self._bar = QtWidgets.QProgressBar()
+        self._bar.setTextVisible(False)
+        self._bar.setRange(0, len(self._steps))
+        self._bar.setValue(0)
+        self._bar.setMaximumHeight(4)
+        self._bar.setStyleSheet(
+            "QProgressBar { border: none; background-color: #E5E7EB; border-radius: 2px; }"
+            "QProgressBar::chunk { background-color: #3B82F6; border-radius: 2px; }"
+        )
+        root.addWidget(self._bar)
+
+        self._stream_box = QtWidgets.QTextEdit()
+        self._stream_box.setReadOnly(True)
+        self._stream_box.setMaximumHeight(200)
+        self._stream_box.setVisible(False)
+        self._stream_box.setStyleSheet(
+            "QTextEdit {"
+            "  background-color: #F9FAFB;"
+            "  border: 1px solid #E5E7EB;"
+            "  border-radius: 6px;"
+            "  padding: 8px;"
+            "  font-family: 'Consolas', 'Microsoft YaHei', monospace;"
+            "  font-size: 12px;"
+            "  color: #374151;"
+            "}"
+        )
+        root.addWidget(self._stream_box)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addStretch(1)
+        self._cancel_btn = QtWidgets.QPushButton("\u53d6\u6d88")
+        self._cancel_btn.setFixedWidth(70)
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self._cancel_btn)
+        root.addLayout(btn_row)
+
+    def advance_to(self, step_index: int, detail: str = "") -> None:
+        if step_index < 0 or step_index >= len(self._steps) or self._cancelled:
+            return
+        is_streaming_step = (
+            step_index == self._current
+            and step_index >= 0
+            and detail
+            and len(detail) > 30
+        )
+        if is_streaming_step:
+            self._show_streaming(detail)
+            return
+        for i in range(len(self._steps)):
+            if i < step_index:
+                self._step_icons[i].setText(self._DONE)
+                self._step_icons[i].setStyleSheet("color:#10B981; font-size:13px;")
+                self._step_labels[i].setStyleSheet("color:#374151; font-size:13px;")
+            elif i == step_index:
+                self._step_icons[i].setText(self._BUSY)
+                self._step_icons[i].setStyleSheet("color:#3B82F6; font-size:13px;")
+                if detail:
+                    self._step_labels[i].setText(f"{self._steps[i]} \u2014 {detail}")
+                else:
+                    self._step_labels[i].setText(self._steps[i])
+                self._step_labels[i].setStyleSheet("color:#1D4ED8; font-weight:bold; font-size:13px;")
+            else:
+                self._step_icons[i].setText(self._TODO)
+                self._step_icons[i].setStyleSheet("color:#9CA3AF; font-size:13px;")
+                self._step_labels[i].setText(self._steps[i])
+                self._step_labels[i].setStyleSheet("color:#9CA3AF; font-size:13px;")
+        self._current = step_index
+        self._bar.setValue(step_index + 1)
+        QtWidgets.QApplication.processEvents()
+
+    def _show_streaming(self, text: str) -> None:
+        if not self._streaming_shown:
+            self._streaming_shown = True
+            self._stream_box.setVisible(True)
+            self._step_labels[self._current].setText(
+                f"{self._steps[self._current]} \u2014 AI 正在输出..."
+            )
+        self._stream_box.setPlainText(text)
+        scrollbar = self._stream_box.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        QtWidgets.QApplication.processEvents()
+
+    def finish_success(self) -> None:
+        total = len(self._steps)
+        for i in range(total):
+            self._step_icons[i].setText(self._DONE)
+            self._step_icons[i].setStyleSheet("color:#10B981; font-size:13px;")
+            self._step_labels[i].setStyleSheet("color:#374151; font-size:13px;")
+        self._bar.setValue(total)
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.setText("\u5b8c\u6210")
+        QtWidgets.QApplication.processEvents()
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def _on_cancel(self) -> None:
+        self._cancelled = True
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.setText("\u53d6\u6d88\u4e2d...")
+
+
 class ReadingMixin:
     def show_reading_json_prompt_help(self) -> None:
         parent = self.reading_window or self
 
         prompt_text = (
-            "你是“目录截图 → 嵌套正文目录 JSON”生成器。输入是目录截图（可多张，按目录顺序）。输出必须是纯 JSON 文本（不要解释、不要 Markdown、不要代码块标记），格式为嵌套数组。\n\n"
-            "【⚠️ 最高优先级规则：严格正文截断与过滤】\n"
-            "1. 黑名单：`附录`、`参考文献`、`参考资料`、`索引`、`致谢`、`后记`、`习题答案`、`习题`、`练习`、`解答`、`解析`、`附表`。\n"
-            "2. 首次遇到含黑名单词的条目，立即停止提取。该条目本身不输出，之后的所有内容忽略。\n"
-            "3. 全书结束页码 = 被过滤的第一条非正文条目的起始页码 - 1。最后输出 `{\"title\":\"全书结束\",\"page\": 整数}` 作为数组最后一项。\n\n"
+            "你是「目录截图 → 嵌套正文目录 JSON」生成器。输入是目录截图（可多张，按目录顺序）。输出必须是纯 JSON 文本（不要解释、不要 Markdown、不要代码块标记），格式为嵌套数组。\n\n"
+            "【⚠️ 正文/非正文区分规则】\n"
+            "1. 以下词汇仅在作为**顶层独立条目**（无父级章节号、不以 X.Y 序号开头）时才视为非正文终止信号：\n"
+            "   `附录`、`参考文献`、`参考资料`、`索引`、`致谢`、`后记`、`附表`、`部分习题参考答案`\n"
+            "2. 如果这些词出现在带章节号的条目中（如「3.8 习题」「4.3 解答」），它们是**正文章节**，必须正常输出！\n"
+            "3. 遇到非正文终止信号后停止提取。全书结束页码 = 最后一个正文章节的起始页码。\n\n"
             "【输出格式规范】\n"
-            "- 顶层是一个 JSON 数组，每一项代表一个“章”或独立部分（如前言、安装）。\n"
+            "- 顶层是一个 JSON 数组，每一项代表一个「章」或独立部分（如前言、安装）。\n"
             "- 每项的结构：\n"
             "  {\n"
             "    \"title\": \"字符串（保留原始序号和文字）\",\n"
@@ -110,30 +268,31 @@ class ReadingMixin:
             "- 数组最后一项必须是 `{\"title\":\"全书结束\",\"page\": 正文最后一页页码整数}`。\n\n"
             "【层级判断与嵌套规则】\n"
             "1. 根据缩进、序号格式（如 X, X.Y, X.Y.Z）或字体粗细判断层级。\n"
-            "2. 顶层：前言、安装、符号、带章节号的一级标题（如“1 引言”、“2 预备知识”）。\n"
+            "2. 顶层：前言、安装、符号、带章节号的一级标题（如「1 引言」、「2 预备知识」）。\n"
             "3. 第二级：出现在顶层条目下方、且序号为 X.Y 格式（如 2.1）的标题，应放入上一级的 children 数组中。\n"
             "4. 第三级及更深：序号为 X.Y.Z 或更多级，放入上一级的 children 数组中（支持无限嵌套）。\n"
-            "5. 对于没有明确序号但明显属于某章的小节（如“数据操作”），根据缩进位置归入正确的父级。\n\n"
+            "5. 对于没有明确序号但明显属于某章的小节（如「数据操作」），根据缩进位置归入正确的父级。\n\n"
             "【抽取与清洗规则】\n"
-            "- 顺序严格按截图从上到下。\n"
+            "- 顺序严格按截图从上到下，**完整输出所有正文章节**，不可遗漏任何带章节号的条目。\n"
             "- 页码取最右侧阿拉伯数字，范围取起始页。\n"
             "- 标题清洗：去除引导点和多余空白，保留序号与文字。\n"
-            "- 若无法识别页码或层级，停止并提问：“请提供[条目名称]的准确页码/层级”。\n\n"
+            "- 若无法识别页码或层级，停止并提问：「请提供[条目名称]的准确页码/层级」。\n\n"
             "【输出示例片段】\n"
             "[\n"
             "  {\"title\":\"前言\",\"page\":1},\n"
-            "  {\"title\":\"2 预备知识\",\"page\":39,\n"
+            "  {\"title\":\"第1章 数值计算导论\",\"page\":1,\n"
             "   \"children\":[\n"
-            "     {\"title\":\"2.1 数据操作\",\"page\":40,\n"
-            "      \"children\":[\n"
-            "        {\"title\":\"2.1.1 入门\",\"page\":40},\n"
-            "        {\"title\":\"2.1.2 运算符\",\"page\":42}\n"
-            "      ]\n"
-            "     },\n"
-            "     {\"title\":\"2.2 数据预处理\",\"page\":47}\n"
+            "     {\"title\":\"1.1 数值计算方法\",\"page\":1},\n"
+            "     {\"title\":\"1.6 习题\",\"page\":20}\n"
             "   ]\n"
             "  },\n"
-            "  {\"title\":\"全书结束\",\"page\":740}\n"
+            "  {\"title\":\"第7章 常微分方程初值问题的数值解法\",\"page\":237,\n"
+            "   \"children\":[\n"
+            "     {\"title\":\"7.6 习题\",\"page\":267}\n"
+            "   ]\n"
+            "  },\n"
+            "  {\"title\":\"附录 部分习题参考答案\",\"page\":272},\n"
+            "  {\"title\":\"全书结束\",\"page\":278}\n"
             "]\n"
         )
 
@@ -147,16 +306,17 @@ class ReadingMixin:
         root.setSpacing(8)
 
         steps = QtWidgets.QLabel(
-            "使用方法：\n"
-            "1) 将书籍目录页截图（确保包含标题和页码，按目录顺序）。\n"
-            "2) 把目录截图 + 下方提示词发给支持图片的推理大模型。\n"
-            "3) 让它输出“纯 JSON 文本”，保存为 .json 文件。\n"
-            "4) 回到本窗口：拖拽该 .json 到上方区域，或点击【选择 JSON 文件导入】。"
+            '使用方法：\n'
+            '1) 将书籍目录页截图（确保包含标题和页码，按目录顺序）。\n'
+            '2) 把目录截图 + 下方提示词发给支持图片的推理大模型。\n'
+            '3) 让它输出「纯 JSON 文本」，保存为 .json 文件。\n'
+            '4) 回到本窗口：拖拽该 .json 到上方区域，或点击【选择 JSON 文件导入】。\n\n'
+            '💡 快捷方式：直接拖拽目录截图或 PDF 到上方区域，软件会自动调用 API 识别！'
         )
         steps.setWordWrap(True)
         root.addWidget(steps)
 
-        status_label = QtWidgets.QLabel("提示：点击【复制提示词】后直接粘贴到大模型对话框即可。")
+        status_label = QtWidgets.QLabel("提示：点击【复制提示词】后直接粘贴到大模型对话框即可。也可直接拖入图片使用智能导入。")
         status_label.setStyleSheet("color:#666666")
         status_label.setWordWrap(True)
         root.addWidget(status_label)
@@ -187,7 +347,7 @@ class ReadingMixin:
         parent = self.reading_window or self
 
         prompt_text = (
-            "你是“学术论文精读规划生成器”。输入一篇文献内容，输出三阶段精读规划的JSON数组。\n\n"
+            "你是「学术论文精读规划生成器」。输入一篇文献内容，输出三阶段精读规划的JSON数组。\n\n"
             "【三阶段核心产出】\n"
             "- 泛读：能口头说清问题、方法和流派。\n"
             "- 半精读：能手写算法伪代码并画数据流图。\n"
@@ -279,16 +439,17 @@ class ReadingMixin:
         root.setSpacing(8)
 
         steps = QtWidgets.QLabel(
-            "使用方法：\n"
-            "1) 准备论文全文或详细摘要文本。\n"
-            "2) 把文本 + 下方提示词发给大模型。\n"
-            "3) 让它输出“纯 JSON 文本”，保存为 .json 文件。\n"
-            "4) 回到本窗口：拖拽该 .json 到上方区域，或点击【选择 JSON 文件导入】。"
+            '使用方法：\n'
+            '1) 准备论文全文或详细摘要文本。\n'
+            '2) 把文本 + 下方提示词发给大模型。\n'
+            '3) 让它输出「纯 JSON 文本」，保存为 .json 文件。\n'
+            '4) 回到本窗口：拖拽该 .json 到上方区域，或点击【选择 JSON 文件导入】。\n\n'
+            '💡 快捷方式：直接拖拽论文截图或 PDF 到上方区域，软件会自动调用 API 生成导读规划！'
         )
         steps.setWordWrap(True)
         root.addWidget(steps)
 
-        status_label = QtWidgets.QLabel("提示：点击【复制提示词】后直接粘贴到大模型对话框即可。")
+        status_label = QtWidgets.QLabel("提示：点击【复制提示词】后直接粘贴到大模型对话框即可。也可直接拖入图片/PDF使用智能导入。")
         status_label.setStyleSheet("color:#666666")
         status_label.setWordWrap(True)
         root.addWidget(status_label)
@@ -472,18 +633,38 @@ class ReadingMixin:
                 event.acceptProposedAction()
 
         def import_book_paths(paths: list[str]) -> None:
+            json_paths = []
+            media_paths = []
             for file_path in paths:
-                if not file_path.lower().endswith(".json"):
-                    QtWidgets.QMessageBox.warning(win, "格式错误", "请拖拽标准的 .json 文件！")
-                    continue
-                self.open_book_import_dialog(file_path)
+                kind = classify_file(file_path)
+                if kind == "json":
+                    json_paths.append(file_path)
+                elif kind in ("image", "pdf"):
+                    media_paths.append(file_path)
+                else:
+                    ext = os.path.splitext(file_path)[1].lower()
+                    QtWidgets.QMessageBox.warning(win, "格式错误", f"不支持的文件格式 ({ext})！")
+            for fp in json_paths:
+                self.open_book_import_dialog(fp)
+            if media_paths:
+                self._smart_import_book(media_paths)
 
         def import_paper_paths(paths: list[str]) -> None:
+            json_paths = []
+            media_paths = []
             for file_path in paths:
-                if not file_path.lower().endswith(".json"):
-                    QtWidgets.QMessageBox.warning(win, "格式错误", "请拖拽标准的 .json 文件！")
-                    continue
-                self.open_paper_import_dialog(file_path)
+                kind = classify_file(file_path)
+                if kind == "json":
+                    json_paths.append(file_path)
+                elif kind in ("image", "pdf"):
+                    media_paths.append(file_path)
+                else:
+                    ext = os.path.splitext(file_path)[1].lower()
+                    QtWidgets.QMessageBox.warning(win, "格式错误", f"不支持的文件格式 ({ext})！")
+            for fp in json_paths:
+                self.open_paper_import_dialog(fp)
+            if media_paths:
+                self._smart_import_paper(media_paths)
 
         tabs = QtWidgets.QTabWidget()
         root.addWidget(tabs, 1)
@@ -493,16 +674,20 @@ class ReadingMixin:
         book_root.setContentsMargins(0, 0, 0, 0)
         book_root.setSpacing(10)
 
-        book_drop = _FileDropLabel("📥 将书籍 JSON 文件拖拽到此处导入", import_book_paths)
+        book_drop = _FileDropLabel("📥 拖拽 JSON / 图片 / PDF 到此处导入", import_book_paths)
         book_root.addWidget(book_drop)
 
         book_btn_row = QtWidgets.QHBoxLayout()
         btn_import_book = QtWidgets.QPushButton("选择 JSON 文件导入")
+        btn_smart_book = QtWidgets.QPushButton("🖼️ 智能导入（图片/PDF）")
         btn_export_book = QtWidgets.QPushButton("导出阅读报表")
         btn_help_book = QtWidgets.QPushButton("操作说明")
+        btn_api_settings = QtWidgets.QPushButton("⚙️ API设置")
         book_btn_row.addWidget(btn_import_book)
+        book_btn_row.addWidget(btn_smart_book)
         book_btn_row.addWidget(btn_export_book)
         book_btn_row.addWidget(btn_help_book)
+        book_btn_row.addWidget(btn_api_settings)
         book_btn_row.addStretch(1)
         book_root.addLayout(book_btn_row)
 
@@ -524,8 +709,10 @@ class ReadingMixin:
         self.reading_tree_metas = {}
 
         btn_import_book.clicked.connect(self.open_book_file_dialog)
+        btn_smart_book.clicked.connect(self._smart_import_book_file_dialog)
         btn_export_book.clicked.connect(self.export_reading_report)
         btn_help_book.clicked.connect(self.show_reading_json_prompt_help)
+        btn_api_settings.clicked.connect(self.show_api_settings_dialog)
 
         tabs.addTab(book_tab, "书籍阅读")
 
@@ -534,14 +721,18 @@ class ReadingMixin:
         paper_root.setContentsMargins(0, 0, 0, 0)
         paper_root.setSpacing(10)
 
-        paper_drop = _FileDropLabel("📥 将文献导读 JSON 文件拖拽到此处导入", import_paper_paths)
+        paper_drop = _FileDropLabel("📥 拖拽 JSON / 图片 / PDF 到此处导入", import_paper_paths)
         paper_root.addWidget(paper_drop)
 
         paper_btn_row = QtWidgets.QHBoxLayout()
         btn_import_paper = QtWidgets.QPushButton("选择 JSON 文件导入")
+        btn_smart_paper = QtWidgets.QPushButton("🖼️ 智能导入（图片/PDF）")
         btn_help_paper = QtWidgets.QPushButton("操作说明")
+        btn_api_settings_paper = QtWidgets.QPushButton("⚙️ API设置")
         paper_btn_row.addWidget(btn_import_paper)
+        paper_btn_row.addWidget(btn_smart_paper)
         paper_btn_row.addWidget(btn_help_paper)
+        paper_btn_row.addWidget(btn_api_settings_paper)
         paper_btn_row.addStretch(1)
         paper_root.addLayout(paper_btn_row)
 
@@ -577,13 +768,470 @@ class ReadingMixin:
         QtCore.QTimer.singleShot(0, self._sync_reading_card_margins)
 
         btn_import_paper.clicked.connect(self.open_paper_file_dialog)
+        btn_smart_paper.clicked.connect(self._smart_import_paper_file_dialog)
         btn_help_paper.clicked.connect(self.show_literature_json_prompt_help)
+        btn_api_settings_paper.clicked.connect(self.show_api_settings_dialog)
 
         tabs.addTab(paper_tab, "文献导读")
 
         win.show()
         # Ensure the first render happens after Qt processes the show event.
         QtCore.QTimer.singleShot(0, self.refresh_reading_ui)
+
+    def show_api_settings_dialog(self) -> None:
+        parent = self.reading_window or self
+
+        dialog = QtWidgets.QDialog(parent)
+        dialog.setWindowTitle("⚙️ API 设置")
+        dialog.resize(440, 280)
+        dialog.setModal(True)
+
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(18, 12, 18, 12)
+        root.setSpacing(8)
+
+        hint = QtWidgets.QLabel(
+            "💡 默认使用硅基流动 + Kimi-K2.5（支持图片识别）\n"
+            "也兼容 DeepSeek / OpenAI / Ollama 等接口\n"
+            "首次使用需填写 API Key，保存后无需再次输入。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#4B5563; padding:4px 0;")
+        root.addWidget(hint)
+
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(6)
+
+        entry_base_url = QtWidgets.QLineEdit(str(app_config.get("llm_api_base_url", "https://api.siliconflow.cn/v1") or ""))
+        entry_api_key = QtWidgets.QLineEdit(str(app_config.get("llm_api_key", "") or ""))
+        entry_api_key.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        entry_model = QtWidgets.QLineEdit(str(app_config.get("llm_api_model", "Pro/moonshotai/Kimi-K2.5") or ""))
+
+        form.addRow("Base URL:", entry_base_url)
+        form.addRow("API Key:", entry_api_key)
+        form.addRow("模型:", entry_model)
+        root.addLayout(form)
+
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_label = QtWidgets.QLabel("快捷预设:")
+        btn_preset_deepseek = QtWidgets.QPushButton("DeepSeek")
+        btn_preset_openai = QtWidgets.QPushButton("OpenAI")
+        btn_preset_silicon = QtWidgets.QPushButton("硅基流动")
+        preset_row.addWidget(preset_label)
+        preset_row.addWidget(btn_preset_deepseek)
+        preset_row.addWidget(btn_preset_openai)
+        preset_row.addWidget(btn_preset_silicon)
+        preset_row.addStretch(1)
+        root.addLayout(preset_row)
+
+        def _apply_preset(base_url: str, model: str) -> None:
+            entry_base_url.setText(base_url)
+            entry_model.setText(model)
+
+        btn_preset_deepseek.clicked.connect(lambda: _apply_preset("https://api.deepseek.com", "deepseek-chat"))
+        btn_preset_openai.clicked.connect(lambda: _apply_preset("https://api.openai.com/v1", "gpt-4o"))
+        btn_preset_silicon.clicked.connect(lambda: _apply_preset("https://api.siliconflow.cn/v1", "Pro/moonshotai/Kimi-K2.5"))
+
+        status_label = QtWidgets.QLabel("")
+        status_label.setWordWrap(True)
+        root.addWidget(status_label)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        btn_test = QtWidgets.QPushButton("测试连接")
+        btn_save = QtWidgets.QPushButton("保存")
+        btn_cancel = QtWidgets.QPushButton("取消")
+        btns.addWidget(btn_test)
+        btns.addWidget(btn_save)
+        btns.addWidget(btn_cancel)
+        root.addLayout(btns)
+
+        def _test_connection() -> None:
+            key = entry_api_key.text().strip()
+            base = entry_base_url.text().strip()
+            model = entry_model.text().strip()
+            if not key:
+                status_label.setText("❌ 请先填写 API Key")
+                status_label.setStyleSheet("color:#DC2626;")
+                return
+            if not base:
+                status_label.setText("❌ 请填写 Base URL")
+                status_label.setStyleSheet("color:#DC2626;")
+                return
+            status_label.setText("正在测试连接...")
+            status_label.setStyleSheet("color:#2563EB;")
+            QtWidgets.QApplication.processEvents()
+
+            import urllib.request
+            import ssl
+            import json as _json
+            url = f"{base.rstrip('/')}/chat/completions"
+            payload = _json.dumps({
+                "model": model or "deepseek-chat",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "max_tokens": 5,
+            }, ensure_ascii=False).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            }
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            try:
+                ctx = ssl._create_unverified_context()
+                with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+                    resp.read()
+                status_label.setText("✅ 连接成功！")
+                status_label.setStyleSheet("color:#16A34A;")
+            except urllib.error.HTTPError as e:
+                if e.code == 401:
+                    status_label.setText("❌ API Key 验证失败")
+                else:
+                    status_label.setText(f"❌ HTTP 错误 {e.code}")
+                status_label.setStyleSheet("color:#DC2626;")
+            except Exception as e:
+                status_label.setText(f"❌ 连接失败: {e}")
+                status_label.setStyleSheet("color:#DC2626;")
+
+        def _save_settings() -> None:
+            app_config["llm_api_key"] = entry_api_key.text().strip()
+            app_config["llm_api_base_url"] = entry_base_url.text().strip() or "https://api.siliconflow.cn/v1"
+            app_config["llm_api_model"] = entry_model.text().strip() or "Pro/moonshotai/Kimi-K2.5"
+            save_app_config()
+            status_label.setText("✅ 已保存")
+            status_label.setStyleSheet("color:#16A34A;")
+            QtCore.QTimer.singleShot(800, dialog.accept)
+
+        btn_test.clicked.connect(_test_connection)
+        btn_save.clicked.connect(_save_settings)
+        btn_cancel.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _ensure_api_configured(self) -> bool:
+        if is_api_configured():
+            return True
+        result = QtWidgets.QMessageBox.question(
+            self.reading_window or self,
+            "API 未配置",
+            "智能导入需要配置 API Key。\n是否现在配置？",
+        )
+        if result == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.show_api_settings_dialog()
+            return is_api_configured()
+        return False
+
+    def _run_with_progress(self, title: str, steps: list[str], worker_fn, on_done) -> None:
+        parent = self.reading_window or self
+        dialog = StepProgressDialog(title, steps, parent)
+
+        class _ProgressSignal(QtCore.QObject):
+            advance = QtCore.Signal(int, str)
+
+        sig = _ProgressSignal()
+        sig.advance.connect(dialog.advance_to)
+
+        dialog.show()
+        QtWidgets.QApplication.processEvents()
+
+        result_holder: list[Any] = []
+        error_holder: list[str] = []
+
+        def _work() -> None:
+            try:
+                def on_step(step_index: int, detail: str = "") -> None:
+                    if not dialog.is_cancelled():
+                        sig.advance.emit(step_index, detail)
+                result = worker_fn(on_step)
+                if not dialog.is_cancelled():
+                    result_holder.append(result)
+            except ApiError as e:
+                if not dialog.is_cancelled():
+                    msg = str(e)
+                    if e.detail:
+                        msg += f"\n\n详细信息:\n{e.detail[:500]}"
+                    error_holder.append(msg)
+            except Exception as e:
+                if not dialog.is_cancelled():
+                    error_holder.append(f"未知错误: {e}")
+
+        def _finish() -> None:
+            if dialog.is_cancelled():
+                dialog.close()
+                return
+            dialog.finish_success()
+            QtCore.QTimer.singleShot(600, dialog.close)
+            if error_holder:
+                QtWidgets.QMessageBox.critical(parent, "导入失败", error_holder[0])
+                return
+            if result_holder:
+                on_done(result_holder[0])
+
+        import threading
+        thread = threading.Thread(target=_work, daemon=True)
+        thread.start()
+
+        def _poll() -> None:
+            if thread.is_alive():
+                QtCore.QTimer.singleShot(200, _poll)
+            else:
+                _finish()
+
+        QtCore.QTimer.singleShot(200, _poll)
+
+    def _smart_import_book(self, file_paths: list[str]) -> None:
+        if not self._ensure_api_configured():
+            return
+
+        parent = self.reading_window or self
+        dialog = QtWidgets.QDialog(parent)
+        dialog.setWindowTitle("📖 智能导入新书")
+        dialog.resize(340, 260)
+        dialog.setModal(True)
+
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(18, 12, 18, 12)
+        root.setSpacing(8)
+
+        file_hint = QtWidgets.QLabel(f"已选择 {len(file_paths)} 个文件")
+        file_hint.setStyleSheet("color:#4B5563;")
+        root.addWidget(file_hint)
+
+        entry_title = QtWidgets.QLineEdit()
+        entry_author = QtWidgets.QLineEdit()
+        entry_version = QtWidgets.QLineEdit()
+        root.addWidget(QtWidgets.QLabel("书名 (必填):"))
+        root.addWidget(entry_title)
+        root.addWidget(QtWidgets.QLabel("作者 (必填):"))
+        root.addWidget(entry_author)
+        root.addWidget(QtWidgets.QLabel("版本/版次 (选填):"))
+        root.addWidget(entry_version)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        cancel_btn = QtWidgets.QPushButton("取消")
+        ok_btn = QtWidgets.QPushButton("确认导入")
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        root.addLayout(btns)
+
+        def confirm_import() -> None:
+            data = global_data
+            if data is None:
+                return
+            title = entry_title.text().strip()
+            author = entry_author.text().strip()
+            version = entry_version.text().strip()
+
+            if not title or not author:
+                QtWidgets.QMessageBox.warning(dialog, "缺少信息", "书名和作者是必填项！")
+                return
+
+            books = data.setdefault("reading_books", {})
+            if title in books:
+                ans = QtWidgets.QMessageBox.question(dialog, "覆盖确认", f"已存在《{title}》，是否覆盖？")
+                if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+
+            dialog.accept()
+
+            def worker(on_step) -> list[Any]:
+                return smart_import_book(file_paths, progress_callback=on_step)
+
+            def on_done(json_data: list[Any]) -> None:
+                try:
+                    book_tree, total_pages = calculate_book_pages(json_data)
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(parent, "解析失败", f"API 返回的 JSON 解析出错: {e}")
+                    return
+                data["reading_books"][title] = {
+                    "author": author,
+                    "version": version,
+                    "total_pages": total_pages,
+                    "read_pages": 0,
+                    "time_spent": 0,
+                    "tree": book_tree,
+                }
+                self.sync_reading_book_progress(data["reading_books"][title])
+                save_data()
+                self.refresh_reading_ui()
+                QtWidgets.QMessageBox.information(parent, "成功", f"《{title}》导入成功！共计 {total_pages} 页。")
+
+            book_steps = [
+                "\u8bfb\u53d6\u6587\u4ef6",
+                "\u51c6\u5907\u56fe\u7247",
+                "\u53d1\u9001\u8bf7\u6c42",
+                "AI \u6b63\u5728\u8bc6\u522b\u76ee\u5f55",
+                "\u89e3\u6790\u8fd4\u56de\u7ed3\u679c",
+            ]
+            self._run_with_progress("\u6b63\u5728\u8bc6\u522b\u76ee\u5f55...", book_steps, worker, on_done)
+
+        ok_btn.clicked.connect(confirm_import)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _smart_import_book_file_dialog(self) -> None:
+        file_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self.reading_window or self,
+            "选择书籍目录图片或PDF",
+            filter="图片与PDF (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.pdf);;所有文件 (*)",
+        )
+        if not file_paths:
+            return
+        self._smart_import_book(file_paths)
+
+    def _smart_import_paper(self, file_paths: list[str]) -> None:
+        if not self._ensure_api_configured():
+            return
+
+        parent = self.reading_window or self
+        dialog = QtWidgets.QDialog(parent)
+        dialog.setWindowTitle("📄 智能导入文献导读")
+        dialog.resize(360, 260)
+        dialog.setModal(True)
+
+        root = QtWidgets.QVBoxLayout(dialog)
+        root.setContentsMargins(18, 12, 18, 12)
+        root.setSpacing(8)
+
+        file_hint = QtWidgets.QLabel(f"已选择 {len(file_paths)} 个文件")
+        file_hint.setStyleSheet("color:#4B5563;")
+        root.addWidget(file_hint)
+
+        entry_title = QtWidgets.QLineEdit()
+        entry_author = QtWidgets.QLineEdit()
+        entry_venue = QtWidgets.QLineEdit()
+        root.addWidget(QtWidgets.QLabel("文献标题 (必填):"))
+        root.addWidget(entry_title)
+        root.addWidget(QtWidgets.QLabel("作者/团队 (选填):"))
+        root.addWidget(entry_author)
+        root.addWidget(QtWidgets.QLabel("会议/期刊/年份 (选填):"))
+        root.addWidget(entry_venue)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        cancel_btn = QtWidgets.QPushButton("取消")
+        ok_btn = QtWidgets.QPushButton("确认导入")
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        root.addLayout(btns)
+
+        def confirm_import() -> None:
+            data = global_data
+            if data is None:
+                return
+            title = entry_title.text().strip()
+            author = entry_author.text().strip()
+            venue = entry_venue.text().strip()
+
+            if not title:
+                QtWidgets.QMessageBox.warning(dialog, "缺少信息", "文献标题是必填项！")
+                return
+
+            papers = data.setdefault("reading_papers", {})
+            if title in papers:
+                ans = QtWidgets.QMessageBox.question(dialog, "覆盖确认", f"已存在《{title}》，是否覆盖？")
+                if ans != QtWidgets.QMessageBox.StandardButton.Yes:
+                    return
+
+            dialog.accept()
+
+            def worker(on_step) -> list[Any]:
+                return smart_import_paper(file_paths, progress_callback=on_step)
+
+            def on_done(json_data: list[Any]) -> None:
+                try:
+                    total_hours = self._parse_paper_json_to_data(json_data, title, author, venue)
+                except Exception as e:
+                    QtWidgets.QMessageBox.critical(parent, "解析失败", f"API 返回的 JSON 解析出错: {e}")
+                    return
+                self.refresh_reading_ui()
+                QtWidgets.QMessageBox.information(parent, "成功", f"《{title}》导入成功！共计 {total_hours:.1f} 小时。")
+
+            paper_steps = [
+                "\u8bfb\u53d6\u6587\u4ef6",
+                "\u51c6\u5907\u56fe\u7247",
+                "\u53d1\u9001\u8bf7\u6c42",
+                "AI \u6b63\u5728\u5206\u6790\u6587\u732e",
+                "\u89e3\u6790\u8fd4\u56de\u7ed3\u679c",
+            ]
+            self._run_with_progress("\u6b63\u5728\u5206\u6790\u6587\u732e...", paper_steps, worker, on_done)
+
+        ok_btn.clicked.connect(confirm_import)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _smart_import_paper_file_dialog(self) -> None:
+        file_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self.reading_window or self,
+            "选择文献图片或PDF",
+            filter="图片与PDF (*.png *.jpg *.jpeg *.gif *.webp *.bmp *.pdf);;所有文件 (*)",
+        )
+        if not file_paths:
+            return
+        self._smart_import_paper(file_paths)
+
+    def _parse_paper_json_to_data(self, json_data: list[Any], title: str, author: str, venue: str) -> float:
+        if not isinstance(json_data, list):
+            raise ValueError("JSON 顶层必须是数组")
+
+        def _coerce_hours(value: Any) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return 0.0
+
+        phases: list[dict[str, Any]] = []
+        total_hours = 0.0
+        for phase in json_data:
+            if not isinstance(phase, dict):
+                continue
+            phase_title = str(phase.get("phase", "") or "").strip()
+            if not phase_title:
+                raise ValueError("阶段名称缺失")
+
+            tasks: list[dict[str, Any]] = []
+            phase_hours = 0.0
+            for task in phase.get("tasks", []) if isinstance(phase.get("tasks"), list) else []:
+                if not isinstance(task, dict):
+                    continue
+                task_title = str(task.get("title", "") or "").strip()
+                if not task_title:
+                    raise ValueError(f"阶段《{phase_title}》中存在空任务标题")
+                subtasks: list[dict[str, Any]] = []
+                task_hours = 0.0
+                for sub in task.get("subtasks", []) if isinstance(task.get("subtasks"), list) else []:
+                    if not isinstance(sub, dict):
+                        continue
+                    sub_title = str(sub.get("title", "") or "").strip()
+                    if not sub_title:
+                        raise ValueError(f"任务《{task_title}》存在空子任务标题")
+                    sub_hours = _coerce_hours(sub.get("hours", 0) or 0)
+                    task_hours += sub_hours
+                    subtasks.append({"title": sub_title, "hours": sub_hours, "done": False, "time_spent": 0})
+
+                task_hours = float(task_hours)
+                tasks.append({"title": task_title, "hours": task_hours, "done": False, "subtasks": subtasks})
+                phase_hours += task_hours
+
+            phase_hours = float(phase_hours)
+            phases.append({"phase": phase_title, "total_hours": phase_hours, "done": False, "tasks": tasks})
+            total_hours += phase_hours
+
+        if not phases:
+            raise ValueError("未找到有效阶段数据")
+
+        data = global_data
+        data.setdefault("reading_papers", {})
+        data["reading_papers"][title] = {
+            "author": author,
+            "venue": venue,
+            "total_hours": total_hours,
+            "done_hours": 0,
+            "time_spent": 0,
+            "phases": phases,
+        }
+        self.sync_literature_progress(data["reading_papers"][title])
+        save_data()
+        return total_hours
 
     def open_book_file_dialog(self) -> None:
         file_paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self.reading_window or self, "选择书籍 JSON 文件", filter="JSON 文件 (*.json)")
