@@ -4,7 +4,8 @@ from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from sgp_qt_core import PENALTY_MULTIPLIER, TASK_CATS, app_config, get_holiday_info, global_data
+from sgp_qt_core import PENALTY_MULTIPLIER, TASK_CATS, app_config, get_holiday_info, global_data, save_app_config
+from sgp_qt_notify import send_wecom_message
 
 
 class UiMixin:
@@ -103,7 +104,15 @@ class UiMixin:
         left_layout.addStretch(1)
 
         # left bottom buttons
-        self.btn_tomato = self._mk_btn("🍅 开始专注 (25分钟)", bg="#FF69B4", fg="white")
+        tomato_row = QtWidgets.QWidget()
+        tomato_row_layout = QtWidgets.QHBoxLayout(tomato_row)
+        tomato_row_layout.setContentsMargins(0, 0, 0, 0)
+        tomato_row_layout.setSpacing(6)
+        self.btn_countdown = self._mk_btn("🍅 番茄倒计时(25m)", bg="#FF69B4", fg="white", w=155)
+        self.btn_countup = self._mk_btn("⏱️ 正向专注计时", bg="#FF69B4", fg="white", w=155)
+        tomato_row_layout.addWidget(self.btn_countdown)
+        tomato_row_layout.addWidget(self.btn_countup)
+
         self.btn_cancel = self._mk_btn("⏹️ 放弃当前计时", bg="#CCCCCC", fg="black")
         self.btn_cancel.setEnabled(False)
 
@@ -126,7 +135,7 @@ class UiMixin:
         # reading button
         self.btn_reading = self._mk_btn("📚 阅读管理", bg="#20B2AA", fg="white")
 
-        left_layout.addWidget(self.btn_tomato)
+        left_layout.addWidget(tomato_row)
         left_layout.addWidget(self.btn_cancel)
         left_layout.addWidget(self.tasks_block)
         left_layout.addWidget(self.btn_reading)
@@ -144,6 +153,7 @@ class UiMixin:
         self.btn_pdf2md = self._mk_btn("📄 批量翻译 / 文本处理", bg="#20B2AA", fg="white")
         self.btn_work_log = self._mk_btn("📒 今日工作日志", bg="#FFB07C", fg="black")
         self.btn_change_dir = self._mk_btn("📁 更改数据存储目录", bg="#B0C4DE", fg="white")
+        self.btn_notify_settings = self._mk_btn("🔔 通知设置", bg="#9370DB", fg="white")
 
         right_layout.addWidget(self.btn_exchange)
         right_layout.addWidget(self.btn_stats)
@@ -151,13 +161,15 @@ class UiMixin:
         right_layout.addWidget(self.btn_pdf2md)
         right_layout.addWidget(self.btn_work_log)
         right_layout.addWidget(self.btn_change_dir)
+        right_layout.addWidget(self.btn_notify_settings)
 
         body_layout.addWidget(left, 1)
         body_layout.addWidget(right, 1)
         root.addWidget(body)
 
         # signals
-        self.btn_tomato.clicked.connect(self.on_tomato_button)
+        self.btn_countdown.clicked.connect(self.on_countdown_button)
+        self.btn_countup.clicked.connect(self.on_countup_button)
         self.btn_cancel.clicked.connect(self.cancel_timer)
         self.btn_change_dir.clicked.connect(self.change_data_directory)
 
@@ -170,6 +182,7 @@ class UiMixin:
         self.btn_memo.clicked.connect(self.open_memo_window)
         self.btn_pdf2md.clicked.connect(self.open_pdf2md_window)
         self.btn_work_log.clicked.connect(self.open_work_log_window)
+        self.btn_notify_settings.clicked.connect(self.open_notify_settings)
 
         self.update_task_buttons()
 
@@ -187,6 +200,204 @@ class UiMixin:
 
     def _todo(self, name: str) -> None:
         QtWidgets.QMessageBox.information(self, "Qt 重构进行中", f"【{name}】尚未迁移到 Qt 版本。\n\n我会在后续步骤逐个迁移。")
+
+    def open_notify_settings(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("🔔 通知设置")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(480)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setSpacing(12)
+
+        cb_enabled = QtWidgets.QCheckBox("启用企业微信通知")
+        cb_enabled.setChecked(bool(app_config.get("notify_enabled")))
+        layout.addWidget(cb_enabled)
+
+        layout.addWidget(QtWidgets.QLabel("企业微信 Webhook URL:"))
+        url_edit = QtWidgets.QLineEdit()
+        url_edit.setText(str(app_config.get("notify_wecom_webhook_url", "")))
+        url_edit.setPlaceholderText("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...")
+        layout.addWidget(url_edit)
+
+        hint = QtWidgets.QLabel(
+            "获取方式: 企业微信群 → 群设置 → 群机器人 → 添加机器人 → 复制 Webhook 地址"
+        )
+        hint.setStyleSheet("color:gray;font-size:9pt;")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addWidget(QtWidgets.QLabel("用户昵称 (多人共用Webhook时区分身份):"))
+        username_edit = QtWidgets.QLineEdit()
+        username_edit.setText(str(app_config.get("notify_username", "")))
+        username_edit.setPlaceholderText("如: 小明 (留空则不显示)")
+        layout.addWidget(username_edit)
+
+        btn_test = QtWidgets.QPushButton("发送测试消息")
+        btn_test.setMinimumHeight(36)
+        layout.addWidget(btn_test)
+
+        test_result = QtWidgets.QLabel("")
+        test_result.setWordWrap(True)
+        layout.addWidget(test_result)
+
+        btn_custom_schedule = QtWidgets.QPushButton("📋 自定义定时消息")
+        btn_custom_schedule.setMinimumHeight(36)
+        layout.addWidget(btn_custom_schedule)
+
+        schedule_hint = QtWidgets.QLabel("设置定时推送的自定义消息，到指定时间自动发送")
+        schedule_hint.setStyleSheet("color:gray;font-size:9pt;")
+        layout.addWidget(schedule_hint)
+
+        layout.addStretch(1)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        cancel_btn = QtWidgets.QPushButton("取消")
+        ok_btn = QtWidgets.QPushButton("保存")
+        btns.addWidget(cancel_btn)
+        btns.addWidget(ok_btn)
+        layout.addLayout(btns)
+
+        def do_test() -> None:
+            url = url_edit.text().strip()
+            if not url:
+                test_result.setText("请先填写 Webhook URL")
+                test_result.setStyleSheet("color:red")
+                return
+            test_result.setText("正在发送...")
+            test_result.setStyleSheet("color:gray")
+
+            import threading
+
+            def _send() -> None:
+                ok = send_wecom_message("通知测试", "如果你看到了这条消息，说明通知通道配置成功！")
+
+                def _update_ui() -> None:
+                    if ok:
+                        test_result.setText("发送成功! 请检查手机企业微信。")
+                        test_result.setStyleSheet("color:green")
+                    else:
+                        test_result.setText("发送失败，请检查 Webhook URL 是否正确。")
+                        test_result.setStyleSheet("color:red")
+
+                try:
+                    from PySide6 import QtCore
+
+                    QtCore.QTimer.singleShot(0, _update_ui)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_send, daemon=True).start()
+
+        btn_test.clicked.connect(do_test)
+
+        btn_custom_schedule.clicked.connect(lambda: self._open_custom_schedule_dialog(dialog))
+
+        def do_save() -> None:
+            app_config["notify_enabled"] = cb_enabled.isChecked()
+            app_config["notify_wecom_webhook_url"] = url_edit.text().strip()
+            app_config["notify_username"] = username_edit.text().strip()
+            save_app_config()
+            dialog.accept()
+            QtWidgets.QMessageBox.information(dialog if dialog.isVisible() else self, "已保存", "通知设置已保存。")
+
+        ok_btn.clicked.connect(do_save)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec()
+
+    def _open_custom_schedule_dialog(self, parent: QtWidgets.QWidget) -> None:
+        dlg = QtWidgets.QDialog(parent)
+        dlg.setWindowTitle("📋 自定义定时消息")
+        dlg.setModal(True)
+        dlg.setMinimumWidth(560)
+        dlg.setMinimumHeight(400)
+
+        main_layout = QtWidgets.QVBoxLayout(dlg)
+        main_layout.setSpacing(10)
+
+        doc_link = QtWidgets.QLabel(
+            '<a href="https://developer.work.weixin.qq.com/document/path/99110" '
+            'style="color:#4169E1;">📖 企业微信消息推送开发文档</a>'
+        )
+        doc_link.setOpenExternalLinks(True)
+        main_layout.addWidget(doc_link)
+
+        at_hint = QtWidgets.QLabel(
+            "提示: 在消息内容中使用 <@userid> 可以@群成员；text 类型可用 mentioned_list 字段@所有人"
+        )
+        at_hint.setStyleSheet("color:gray;font-size:9pt;")
+        at_hint.setWordWrap(True)
+        main_layout.addWidget(at_hint)
+
+        messages = list(app_config.get("custom_scheduled_messages", []))
+
+        list_widget = QtWidgets.QListWidget()
+        list_widget.setFont(self._font(size=10))
+        for item in messages:
+            time_str = item.get("time", "")
+            content = item.get("content", "")
+            display = f"[{time_str}] {content}"
+            list_widget.addItem(display)
+        main_layout.addWidget(list_widget)
+
+        add_layout = QtWidgets.QHBoxLayout()
+        add_layout.setSpacing(8)
+
+        time_edit = QtWidgets.QTimeEdit()
+        time_edit.setDisplayFormat("HH:mm")
+        time_edit.setMinimumWidth(80)
+        add_layout.addWidget(QtWidgets.QLabel("时间:"))
+        add_layout.addWidget(time_edit)
+
+        content_edit = QtWidgets.QLineEdit()
+        content_edit.setPlaceholderText("输入定时推送的消息内容...")
+        add_layout.addWidget(content_edit, 1)
+
+        btn_add = QtWidgets.QPushButton("添加")
+        btn_add.setMinimumHeight(32)
+        add_layout.addWidget(btn_add)
+        main_layout.addLayout(add_layout)
+
+        btn_del = QtWidgets.QPushButton("🗑️ 删除选中")
+        btn_del.setMinimumHeight(32)
+        main_layout.addWidget(btn_del)
+
+        btns = QtWidgets.QHBoxLayout()
+        btns.addStretch(1)
+        close_btn = QtWidgets.QPushButton("关闭")
+        btns.addWidget(close_btn)
+        main_layout.addLayout(btns)
+
+        def do_add() -> None:
+            t = time_edit.time().toString("HH:mm")
+            c = content_edit.text().strip()
+            if not c:
+                QtWidgets.QMessageBox.warning(dlg, "提示", "请输入消息内容！")
+                return
+            messages.append({"time": t, "content": c})
+            list_widget.addItem(f"[{t}] {c}")
+            content_edit.clear()
+            _save_messages()
+
+        def do_del() -> None:
+            row = list_widget.currentRow()
+            if row < 0:
+                QtWidgets.QMessageBox.information(dlg, "提示", "请先选择要删除的条目。")
+                return
+            if row < len(messages):
+                messages.pop(row)
+            list_widget.takeItem(row)
+            _save_messages()
+
+        def _save_messages() -> None:
+            app_config["custom_scheduled_messages"] = list(messages)
+            save_app_config()
+
+        btn_add.clicked.connect(do_add)
+        btn_del.clicked.connect(do_del)
+        close_btn.clicked.connect(dlg.accept)
+        dlg.exec()
 
     # ------------------- layout sizing -------------------
 
@@ -294,9 +505,15 @@ class UiMixin:
             self.penalty_hint_label.setText(f"✅ 当前完成率 {rate:.0f}%，无扣分")
 
     def format_minutes(self, minutes: float) -> str:
-        mins = int(round(minutes))
+        total_secs = int(round(minutes * 60))
+        if total_secs <= 0:
+            return "0min"
+        if total_secs < 60:
+            return f"{total_secs}秒"
+        mins = total_secs // 60
+        secs = total_secs % 60
         if mins < 60:
-            return f"{mins}min"
+            return f"{mins}min" + (f"{secs}秒" if secs else "")
         h, m = divmod(mins, 60)
         return f"{h}h{m}min"
 

@@ -11,6 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from sgp_qt_core import DATA_FOLDER_NAME, app_config, init_data, load_app_config, save_app_config
 from sgp_qt_dialogs import FocusTask
+from sgp_qt_notify import NotificationManager
 from sgp_qt_platform import windows_force_top_alert
 from sgp_qt_charts import ChartsMixin
 from sgp_qt_exchange import ExchangeMixin
@@ -51,7 +52,9 @@ class StudyGameQt(
 
         # state
         self.time_left = 0
+        self.elapsed_seconds = 0
         self.timer_running = False
+        self.timer_mode = ""  # "countdown" | "countup" | ""
         self.current_stage = ""  # "study" | "break" | ""
         self.current_focus_task: FocusTask | None = None
         self.focus_segment_start_dt: datetime | None = None
@@ -73,6 +76,9 @@ class StudyGameQt(
         self.handle_new_day_rollover(show_popup=True)
         self.schedule_daily_check()
         self._refresh_all_labels()
+
+        self.notification_manager = NotificationManager(self)
+        self.notification_manager.start()
 
         # Similar to tkinter after(50,...): let layout settle, then adjust.
         QtCore.QTimer.singleShot(50, self._ensure_fit_height)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import traceback
 from typing import Any
 
@@ -213,6 +214,9 @@ class _StdoutRedirector:
             self._buffer = ""
 
 
+_stdout_lock = threading.Lock()
+
+
 class BatchWorker(QtCore.QThread):
     log_signal = QtCore.Signal(str)
     progress_signal = QtCore.Signal(int, str)
@@ -228,6 +232,7 @@ class BatchWorker(QtCore.QThread):
         llm_base: str,
         llm_model: str,
         model_version: str,
+        translate_prompt: str | None = None,
     ) -> None:
         super().__init__()
         self._pdf_list = pdf_list
@@ -237,6 +242,7 @@ class BatchWorker(QtCore.QThread):
         self._llm_base = llm_base
         self._llm_model = llm_model
         self._model_version = model_version
+        self._translate_prompt = translate_prompt
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -251,8 +257,9 @@ class BatchWorker(QtCore.QThread):
         )
 
         _redirect = _StdoutRedirector(self.log_signal)
-        _old_stdout = sys.stdout
-        sys.stdout = _redirect
+        with _stdout_lock:
+            _old_stdout = sys.stdout
+            sys.stdout = _redirect
 
         try:
             os.makedirs(self._output_dir, exist_ok=True)
@@ -320,7 +327,7 @@ class BatchWorker(QtCore.QThread):
                         translate_pct_start = pct_base + int((pct_next - pct_base) * 0.3)
                         self.progress_signal.emit(translate_pct_start, f"[{idx+1}/{total}] 翻译中...")
 
-                        zh_markdown = translate_to_chinese(markdown, self._llm_key, self._llm_base, self._llm_model)
+                        zh_markdown = translate_to_chinese(markdown, self._llm_key, self._llm_base, self._llm_model, prompt=self._translate_prompt)
 
                         zh_path = os.path.join(self._output_dir, f"{basename}_zh.md")
                         with open(zh_path, "w", encoding="utf-8") as f:
@@ -345,7 +352,8 @@ class BatchWorker(QtCore.QThread):
             self.error_signal.emit(str(e))
             traceback.print_exc()
         finally:
-            sys.stdout = _old_stdout
+            with _stdout_lock:
+                sys.stdout = _old_stdout
 
 
 class Pdf2MdWindow(QtWidgets.QDialog):
@@ -401,11 +409,15 @@ class Pdf2MdWindow(QtWidgets.QDialog):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(10)
 
+        header_row = QtWidgets.QHBoxLayout()
         header = QtWidgets.QLabel("📄 PDF 批量转 Markdown & 翻译")
         header.setFont(self._font(size=14, bold=True))
         header.setStyleSheet("color:#FF69B4;")
         header.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(header)
+        self._btn_edit_prompt = self._mk_btn("📝 修改提示词", "#DDA0DD", "white", w=120)
+        header_row.addWidget(header, 1)
+        header_row.addWidget(self._btn_edit_prompt)
+        root.addLayout(header_row)
 
         desc = QtWidgets.QLabel("将 PDF 论文转为结构化 Markdown，英文论文自动翻译为中文并输出双版本")
         desc.setWordWrap(True)
@@ -530,6 +542,7 @@ class Pdf2MdWindow(QtWidgets.QDialog):
         self._file_list.files_dropped.connect(self._on_files_dropped)
         self._btn_browse_output.clicked.connect(self._on_browse_output)
         self._btn_api.clicked.connect(self._on_open_api_settings)
+        self._btn_edit_prompt.clicked.connect(self._on_edit_translate_prompt)
         self._btn_start.clicked.connect(self._on_start)
         self._btn_cancel.clicked.connect(self._on_cancel)
         self._btn_open_dir.clicked.connect(self._on_open_output_dir)
@@ -557,6 +570,54 @@ class Pdf2MdWindow(QtWidgets.QDialog):
         dlg = ApiSettingsDialog(self)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             dlg.save_settings()
+
+    def _on_edit_translate_prompt(self) -> None:
+        from pdf2md_poc import TRANSLATE_PROMPT
+
+        current_prompt = app_config.get("pdf2md_translate_prompt", "") or TRANSLATE_PROMPT
+
+        edit_dlg = QtWidgets.QDialog(self)
+        edit_dlg.setWindowTitle("修改翻译提示词")
+        edit_dlg.resize(720, 560)
+        edit_dlg.setModal(True)
+
+        edit_root = QtWidgets.QVBoxLayout(edit_dlg)
+        edit_root.setContentsMargins(12, 12, 12, 12)
+        edit_root.setSpacing(8)
+
+        hint = QtWidgets.QLabel("修改下方翻译提示词后点击「保存」，留空则恢复默认提示词。")
+        hint.setStyleSheet("color:#666666")
+        hint.setWordWrap(True)
+        edit_root.addWidget(hint)
+
+        text_edit = QtWidgets.QTextEdit()
+        text_edit.setPlainText(current_prompt)
+        edit_root.addWidget(text_edit, 1)
+
+        edit_btns = QtWidgets.QHBoxLayout()
+        edit_btns.addStretch(1)
+        btn_reset = QtWidgets.QPushButton("恢复默认")
+        btn_save = QtWidgets.QPushButton("保存")
+        btn_cancel = QtWidgets.QPushButton("取消")
+        edit_btns.addWidget(btn_reset)
+        edit_btns.addWidget(btn_save)
+        edit_btns.addWidget(btn_cancel)
+        edit_root.addLayout(edit_btns)
+
+        def reset_default() -> None:
+            text_edit.setPlainText(TRANSLATE_PROMPT)
+
+        btn_reset.clicked.connect(reset_default)
+        btn_save.clicked.connect(edit_dlg.accept)
+        btn_cancel.clicked.connect(edit_dlg.reject)
+
+        if edit_dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            new_text = text_edit.toPlainText()
+            if new_text.strip() == TRANSLATE_PROMPT.strip() or not new_text.strip():
+                app_config.pop("pdf2md_translate_prompt", None)
+            else:
+                app_config["pdf2md_translate_prompt"] = new_text
+            save_app_config()
 
     def _on_add_files(self) -> None:
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -611,7 +672,7 @@ class Pdf2MdWindow(QtWidgets.QDialog):
         self._log_box.append(msg)
         sb = self._log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
-        QtWidgets.QApplication.processEvents()
+        self._log_box.repaint()
 
     def _set_progress(self, value: int, text: str = "") -> None:
         self._progress_bar.setValue(value)
@@ -619,7 +680,7 @@ class Pdf2MdWindow(QtWidgets.QDialog):
             self._progress_bar.setFormat(text)
         else:
             self._progress_bar.setFormat(f"{value}%")
-        QtWidgets.QApplication.processEvents()
+        self._progress_bar.repaint()
 
     def _on_cancel(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -665,10 +726,12 @@ class Pdf2MdWindow(QtWidgets.QDialog):
         llm_cfg = app_config.get("pdf2md", {})
         llm_model = llm_cfg.get("llm_model", "").strip() or "Pro/deepseek-ai/DeepSeek-V3.2"
         llm_base = llm_cfg.get("llm_base", "").strip() or "https://api.siliconflow.cn/v1"
+        translate_prompt = app_config.get("pdf2md_translate_prompt", "") or None
 
         self._worker = BatchWorker(
             pdf_list, output_dir, mineru_token,
             llm_key, llm_base, llm_model, model_version,
+            translate_prompt=translate_prompt,
         )
         self._worker.log_signal.connect(self._log)
         self._worker.progress_signal.connect(self._set_progress)

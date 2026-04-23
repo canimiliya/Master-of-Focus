@@ -10,6 +10,8 @@ import json
 import os
 import shutil
 import ssl
+import sys
+import tempfile
 import urllib.request
 from datetime import datetime, timedelta
 from typing import Any
@@ -46,6 +48,9 @@ def default_app_config() -> dict[str, Any]:
         "llm_api_key": "",
         "llm_api_base_url": "https://api.siliconflow.cn/v1",
         "llm_api_model": "Pro/moonshotai/Kimi-K2.5",
+        "notify_enabled": False,
+        "notify_wecom_webhook_url": "",
+        "notify_username": "",
     }
 
 
@@ -68,8 +73,8 @@ def load_app_config() -> None:
                 try:
                     os.makedirs(CONFIG_DIR, exist_ok=True)
                     shutil.move(legacy_path, APP_CONFIG_FILE)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[ERROR] migrate config from {legacy_path}: {e}", file=sys.stderr)
                 break
 
     app_config.clear()
@@ -81,8 +86,8 @@ def load_app_config() -> None:
                 loaded = json.load(f)
             if isinstance(loaded, dict):
                 app_config.update(loaded)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] load_app_config parse failed: {e}", file=sys.stderr)
 
     if app_config.get("data_dir") and not app_config.get("storage_root_dir"):
         app_config["storage_root_dir"] = os.path.dirname(app_config["data_dir"])
@@ -92,23 +97,38 @@ def load_app_config() -> None:
         app_config["storage_dir_confirmed"] = True
 
 
-def save_app_config() -> None:
-    os.makedirs(CONFIG_DIR, exist_ok=True)
+def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
+    dir_name = os.path.dirname(path)
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
     try:
-        with open(APP_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(app_config, f, ensure_ascii=False, indent=4)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+        shutil.move(tmp_path, path)
     except Exception:
-        pass
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise
+
+
+def save_app_config() -> None:
+    try:
+        _atomic_write_json(APP_CONFIG_FILE, app_config)
+    except Exception as e:
+        print(f"[ERROR] save_app_config failed: {e}", file=sys.stderr)
 
 
 def save_data() -> None:
     if DATA_FILE_PATH is None:
         return
     try:
-        with open(DATA_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(global_data, f, ensure_ascii=False, indent=4)
-    except Exception:
-        pass
+        _atomic_write_json(DATA_FILE_PATH, global_data)
+    except Exception as e:
+        print(f"[ERROR] save_data failed: {e}", file=sys.stderr)
 
 
 def compute_read_pages_from_tree(tree: list[dict[str, Any]] | None) -> int:
@@ -272,7 +292,8 @@ def init_data() -> dict[str, Any]:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 loaded_data = raw
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] init_data load failed: {e}", file=sys.stderr)
             loaded_data = None
 
     if loaded_data is not None:
@@ -344,11 +365,12 @@ def get_holiday_info(date_str: str) -> dict[str, Any] | None:
     url = f"{base}{date_str}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        context = ssl._create_unverified_context()
+        context = ssl.create_default_context()
         with urllib.request.urlopen(req, timeout=5, context=context) as resp:
             payload = resp.read().decode("utf-8")
             data = json.loads(payload)
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] get_holiday_info failed for {date_str}: {e}", file=sys.stderr)
         return None
 
     if not isinstance(data, dict) or data.get("code") != 0:
@@ -356,6 +378,10 @@ def get_holiday_info(date_str: str) -> dict[str, Any] | None:
 
     if isinstance(cache, dict):
         cache[date_str] = data
+        cutoff = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        stale_keys = [k for k in cache if isinstance(k, str) and k < cutoff]
+        for k in stale_keys:
+            del cache[k]
     save_app_config()
     return data
 

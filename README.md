@@ -106,6 +106,8 @@ study_game_pro/
 ├── sgp_qt_charts.py         # Matplotlib 图表看板
 ├── sgp_qt_pdf2md.py         # 论文批量翻译窗口（UI + 后台线程）
 ├── sgp_qt_api.py            # LLM Vision API 辅助（无 Qt 依赖）
+├── sgp_qt_notify.py         # 企业微信 Webhook 通知模块
+├── sgp_qt_prompts.py        # LLM 提示词模板
 ├── pdf2md_poc.py            # PDF→Markdown 核心逻辑（MinerU + 翻译）
 ├── .gitignore
 ├── LICENSE
@@ -120,6 +122,115 @@ python -m PyInstaller --onefile --noconsole --name change_self study_game_pro_qt
 ```
 
 输出：`dist/change_self.exe`
+
+## 配置说明
+
+### API 配置
+
+1. **MinerU API**（PDF解析）：
+   - 访问 [MinerU](https://mineru.net) 获取 Token
+   - 在「论文批量翻译」窗口点击「API 设置」配置
+
+2. **SiliconFlow API**（翻译服务）：
+   - 访问 [SiliconFlow](https://siliconflow.cn) 获取 API Key
+   - 在「论文批量翻译」窗口点击「API 设置」配置
+
+3. **LLM Vision API**（图片/PDF识别）：
+   - 支持 OpenAI、DeepSeek 等兼容 API
+   - 在「LLM Vision API」功能中配置
+
+### 通知配置
+
+1. **企业微信 Webhook**：
+   - 在企业微信群聊中添加「群机器人」获取 Webhook URL
+   - 在「设置」→「通知设置」中配置
+
+### 数据目录配置
+
+- 首次启动时会要求选择数据存储根目录
+- 配置文件位置：`~/.study_game/config.json`
+- 可手动修改配置或通过界面设置
+
+## 开发指南
+
+### 环境设置
+
+```bash
+# 克隆仓库
+git clone https://github.com/canimiliya/Master-of-Focus.git
+cd Master-of-Focus
+
+# 创建虚拟环境（可选）
+python -m venv venv
+venv\Scripts\activate  # Windows
+
+# 安装依赖
+pip install pyside6 matplotlib
+pip install win10toast  # 可选：Windows 通知
+```
+
+### 代码结构
+
+- **核心逻辑**：`sgp_qt_core.py` - 数据模型与业务逻辑（无 Qt 依赖）
+- **UI 混合类**：`sgp_qt_main_window.py` 组合多个 Mixin 功能模块
+- **功能模块**：每个 `sgp_qt_*.py` 文件负责特定功能
+- **POC 模块**：`pdf2md_poc.py` 包含 PDF 解析与翻译核心算法
+
+### 运行测试
+
+```bash
+# 直接运行主程序
+python study_game_pro_qt.py
+
+# 运行独立测试脚本
+python pdf2md_poc.py  # 测试 PDF 解析功能
+```
+
+## 贡献指南
+
+我们欢迎任何形式的贡献，包括但不限于：
+
+### 报告问题
+- 使用 GitHub Issues 报告 Bug 或提出功能建议
+- 提供详细的重现步骤和环境信息
+
+### 提交代码
+1. Fork 本仓库
+2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add some amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 开启 Pull Request
+
+### 开发规范
+- 遵循现有代码风格（PEP 8 基础）
+- 添加适当的类型注解
+- 确保代码兼容 Python 3.10+
+- 更新相关文档（README、注释等）
+
+## 常见问题
+
+### Q: 程序启动时提示「数据目录未选择」
+A: 首次启动必须选择数据存储根目录，请按照提示选择合适的位置。
+
+### Q: PDF 解析功能无法使用
+A: 请确保已正确配置 MinerU API Token，并检查网络连接。
+
+### Q: 企业微信通知不工作
+A: 检查 Webhook URL 是否正确，确保企业微信群机器人已启用。
+
+### Q: 打包后的程序无法运行
+A: 确保使用 PyInstaller 打包时包含所有必要资源，或尝试在虚拟环境中打包。
+
+### Q: 如何备份数据？
+A: 数据存储在「专注改变（个人软件数据）」文件夹中，可直接复制该文件夹进行备份。
+
+## 更新日志
+
+### v1.0.0 (2026-04-23)
+- 初始版本发布
+- 集成番茄钟、任务管理、阅读管理、PDF翻译等核心功能
+- 支持企业微信通知
+- 提供数据图表与报表导出
 
 ## License
 

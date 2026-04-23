@@ -379,12 +379,14 @@ def _split_markdown_chunks(text: str, chunk_size: int = TRANSLATE_CHUNK_SIZE,
 
 def translate_to_chinese(markdown_text: str, api_key: str,
                          base_url: str = SILICONFLOW_BASE_URL,
-                         model: str = SILICONFLOW_MODEL) -> str:
+                         model: str = SILICONFLOW_MODEL,
+                         prompt: str | None = None) -> str:
+    system_prompt = prompt if prompt else TRANSLATE_PROMPT
     chunks = _split_markdown_chunks(markdown_text)
     if len(chunks) == 1:
         _log("翻译", f"单次翻译, 长度: {len(markdown_text)}")
         messages = [
-            {"role": "system", "content": TRANSLATE_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": markdown_text},
         ]
         return _call_llm_stream(messages, api_key, base_url, model)
@@ -393,7 +395,7 @@ def translate_to_chinese(markdown_text: str, api_key: str,
     for i, chunk in enumerate(chunks, 1):
         _log("翻译", f"=== 第 {i}/{len(chunks)} 块, 长度: {len(chunk)} ===")
         messages = [
-            {"role": "system", "content": TRANSLATE_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": chunk},
         ]
         part = _call_llm_stream(messages, api_key, base_url, model)

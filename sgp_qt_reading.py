@@ -15,6 +15,7 @@ from sgp_qt_api import (
     smart_import_book,
     smart_import_paper,
 )
+from sgp_qt_prompts import DEFAULT_BOOK_JSON_PROMPT, DEFAULT_PAPER_JSON_PROMPT
 
 
 class _CandyProgressBar(QtWidgets.QProgressBar):
@@ -211,7 +212,7 @@ class StepProgressDialog(QtWidgets.QDialog):
                 self._step_labels[i].setStyleSheet("color:#9CA3AF; font-size:13px;")
         self._current = step_index
         self._bar.setValue(step_index + 1)
-        QtWidgets.QApplication.processEvents()
+        self.repaint()
 
     def _show_streaming(self, text: str) -> None:
         if not self._streaming_shown:
@@ -223,7 +224,7 @@ class StepProgressDialog(QtWidgets.QDialog):
         self._stream_box.setPlainText(text)
         scrollbar = self._stream_box.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-        QtWidgets.QApplication.processEvents()
+        self.repaint()
 
     def finish_success(self) -> None:
         total = len(self._steps)
@@ -234,7 +235,7 @@ class StepProgressDialog(QtWidgets.QDialog):
         self._bar.setValue(total)
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.setText("\u5b8c\u6210")
-        QtWidgets.QApplication.processEvents()
+        self.repaint()
 
     def is_cancelled(self) -> bool:
         return self._cancelled
@@ -249,52 +250,7 @@ class ReadingMixin:
     def show_reading_json_prompt_help(self) -> None:
         parent = self.reading_window or self
 
-        prompt_text = (
-            "你是「目录截图 → 嵌套正文目录 JSON」生成器。输入是目录截图（可多张，按目录顺序）。输出必须是纯 JSON 文本（不要解释、不要 Markdown、不要代码块标记），格式为嵌套数组。\n\n"
-            "【⚠️ 正文/非正文区分规则】\n"
-            "1. 以下词汇仅在作为**顶层独立条目**（无父级章节号、不以 X.Y 序号开头）时才视为非正文终止信号：\n"
-            "   `附录`、`参考文献`、`参考资料`、`索引`、`致谢`、`后记`、`附表`、`部分习题参考答案`\n"
-            "2. 如果这些词出现在带章节号的条目中（如「3.8 习题」「4.3 解答」），它们是**正文章节**，必须正常输出！\n"
-            "3. 遇到非正文终止信号后停止提取。全书结束页码 = 最后一个正文章节的起始页码。\n\n"
-            "【输出格式规范】\n"
-            "- 顶层是一个 JSON 数组，每一项代表一个「章」或独立部分（如前言、安装）。\n"
-            "- 每项的结构：\n"
-            "  {\n"
-            "    \"title\": \"字符串（保留原始序号和文字）\",\n"
-            "    \"page\": 整数（该部分的起始页码）,\n"
-            "    \"children\": [ ... ]   // 可选，存放下一级条目\n"
-            "  }\n"
-            "- 若没有子条目，可以省略 children 或设为空数组。\n"
-            "- 数组最后一项必须是 `{\"title\":\"全书结束\",\"page\": 正文最后一页页码整数}`。\n\n"
-            "【层级判断与嵌套规则】\n"
-            "1. 根据缩进、序号格式（如 X, X.Y, X.Y.Z）或字体粗细判断层级。\n"
-            "2. 顶层：前言、安装、符号、带章节号的一级标题（如「1 引言」、「2 预备知识」）。\n"
-            "3. 第二级：出现在顶层条目下方、且序号为 X.Y 格式（如 2.1）的标题，应放入上一级的 children 数组中。\n"
-            "4. 第三级及更深：序号为 X.Y.Z 或更多级，放入上一级的 children 数组中（支持无限嵌套）。\n"
-            "5. 对于没有明确序号但明显属于某章的小节（如「数据操作」），根据缩进位置归入正确的父级。\n\n"
-            "【抽取与清洗规则】\n"
-            "- 顺序严格按截图从上到下，**完整输出所有正文章节**，不可遗漏任何带章节号的条目。\n"
-            "- 页码取最右侧阿拉伯数字，范围取起始页。\n"
-            "- 标题清洗：去除引导点和多余空白，保留序号与文字。\n"
-            "- 若无法识别页码或层级，停止并提问：「请提供[条目名称]的准确页码/层级」。\n\n"
-            "【输出示例片段】\n"
-            "[\n"
-            "  {\"title\":\"前言\",\"page\":1},\n"
-            "  {\"title\":\"第1章 数值计算导论\",\"page\":1,\n"
-            "   \"children\":[\n"
-            "     {\"title\":\"1.1 数值计算方法\",\"page\":1},\n"
-            "     {\"title\":\"1.6 习题\",\"page\":20}\n"
-            "   ]\n"
-            "  },\n"
-            "  {\"title\":\"第7章 常微分方程初值问题的数值解法\",\"page\":237,\n"
-            "   \"children\":[\n"
-            "     {\"title\":\"7.6 习题\",\"page\":267}\n"
-            "   ]\n"
-            "  },\n"
-            "  {\"title\":\"附录 部分习题参考答案\",\"page\":272},\n"
-            "  {\"title\":\"全书结束\",\"page\":278}\n"
-            "]\n"
-        )
+        prompt_text = app_config.get("reading_book_prompt", "") or DEFAULT_BOOK_JSON_PROMPT
 
         dialog = QtWidgets.QDialog(parent)
         dialog.setWindowTitle("📚 目录截图 → JSON 操作说明")
@@ -328,16 +284,68 @@ class ReadingMixin:
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
+        btn_edit = QtWidgets.QPushButton("修改提示词")
         btn_copy = QtWidgets.QPushButton("复制提示词")
         btn_close = QtWidgets.QPushButton("关闭")
+        btns.addWidget(btn_edit)
         btns.addWidget(btn_copy)
         btns.addWidget(btn_close)
         root.addLayout(btns)
 
+        prompt_holder = [prompt_text]
+
         def copy_prompt() -> None:
-            QtWidgets.QApplication.clipboard().setText(prompt_text)
+            QtWidgets.QApplication.clipboard().setText(prompt_holder[0])
             status_label.setText("提示词已复制到剪贴板。")
 
+        def edit_prompt() -> None:
+            edit_dlg = QtWidgets.QDialog(dialog)
+            edit_dlg.setWindowTitle("修改提示词")
+            edit_dlg.resize(720, 560)
+            edit_dlg.setModal(True)
+
+            edit_root = QtWidgets.QVBoxLayout(edit_dlg)
+            edit_root.setContentsMargins(12, 12, 12, 12)
+            edit_root.setSpacing(8)
+
+            hint = QtWidgets.QLabel("修改下方提示词后点击「保存」，留空则恢复默认提示词。")
+            hint.setStyleSheet("color:#666666")
+            hint.setWordWrap(True)
+            edit_root.addWidget(hint)
+
+            text_edit = QtWidgets.QTextEdit()
+            text_edit.setPlainText(prompt_holder[0])
+            edit_root.addWidget(text_edit, 1)
+
+            edit_btns = QtWidgets.QHBoxLayout()
+            edit_btns.addStretch(1)
+            btn_reset = QtWidgets.QPushButton("恢复默认")
+            btn_save = QtWidgets.QPushButton("保存")
+            btn_cancel = QtWidgets.QPushButton("取消")
+            edit_btns.addWidget(btn_reset)
+            edit_btns.addWidget(btn_save)
+            edit_btns.addWidget(btn_cancel)
+            edit_root.addLayout(edit_btns)
+
+            def reset_default() -> None:
+                text_edit.setPlainText(DEFAULT_BOOK_JSON_PROMPT)
+
+            btn_reset.clicked.connect(reset_default)
+            btn_save.clicked.connect(edit_dlg.accept)
+            btn_cancel.clicked.connect(edit_dlg.reject)
+
+            if edit_dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                new_text = text_edit.toPlainText()
+                if new_text.strip() == DEFAULT_BOOK_JSON_PROMPT.strip() or not new_text.strip():
+                    app_config.pop("reading_book_prompt", None)
+                else:
+                    app_config["reading_book_prompt"] = new_text
+                save_app_config()
+                prompt_holder[0] = new_text if new_text.strip() else DEFAULT_BOOK_JSON_PROMPT
+                edit.setPlainText(prompt_holder[0])
+                status_label.setText("提示词已保存。")
+
+        btn_edit.clicked.connect(edit_prompt)
         btn_copy.clicked.connect(copy_prompt)
         btn_close.clicked.connect(dialog.accept)
 
@@ -346,88 +354,7 @@ class ReadingMixin:
     def show_literature_json_prompt_help(self) -> None:
         parent = self.reading_window or self
 
-        prompt_text = (
-            "你是「学术论文精读规划生成器」。输入一篇文献内容，输出三阶段精读规划的JSON数组。\n\n"
-            "【三阶段核心产出】\n"
-            "- 泛读：能口头说清问题、方法和流派。\n"
-            "- 半精读：能手写算法伪代码并画数据流图。\n"
-            "- 精读：能用代码复现核心创新点并与论文结果趋势对齐。\n\n"
-            "【输出格式】\n"
-            "[\n"
-            "  {\n"
-            "    \"phase\": \"阶段名称\",\n"
-            "    \"total_hours\": 数字,\n"
-            "    \"tasks\": [\n"
-            "      {\n"
-            "        \"title\": \"任务名\",\n"
-            "        \"hours\": 数字,\n"
-            "        \"subtasks\": [\n"
-            "          {\"title\": \"动作描述（对象+动作+产出）\", \"hours\": 数字}\n"
-            "        ]\n"
-            "      }\n"
-            "    ]\n"
-            "  }\n"
-            "]\n\n"
-            "【动作指令规则】\n"
-            "每个subtask的title必须包含：论文具体元素 + 动作 + 产出物。\n"
-            "动作动词用：写、画、标注、口头复述、手算、敲代码、截图对比。\n"
-            "禁止用：理解、分析、掌握。\n\n"
-            "【各阶段任务设计】\n"
-            "1. 泛读（约2.5h）：提取问题与方案、标注核心图、画方法谱系图、记局限。\n"
-            "2. 半精读（约4.5h）：手写伪代码并标公式出处、画数据流图标维度、手动走查一个简单例子。\n"
-            "3. 精读（约11h）：圈定核心创新点、独立推导关键公式、实现核心模块代码、最小环境验证趋势、迁移思考。\n\n"
-            "【时间估计】\n"
-            "每个subtask 0.3~1.2h，阶段总时向上取整。\n\n"
-            "【输出要求】\n"
-            "只输出纯JSON，无任何解释或代码块标记。\n\n"
-            "【示例输入】\n"
-            "（粘贴论文内容）\n\n"
-            "【示例输出结构】\n"
-            "[\n"
-            "  {\n"
-            "    \"phase\": \"泛读：知道做了什么，属于哪一派\",\n"
-            "    \"total_hours\": 2.5,\n"
-            "    \"tasks\": [\n"
-            "      {\n"
-            "        \"title\": \"提取核心问题与方案\",\n"
-            "        \"hours\": 1.0,\n"
-            "        \"subtasks\": [\n"
-            "          {\"title\": \"在Abstract划出问题和方法句，用自己的话口头复述\", \"hours\": 0.4},\n"
-            "          {\"title\": \"在Fig.1旁标注输入和输出分别是什么\", \"hours\": 0.3},\n"
-            "          {\"title\": \"在Introduction末尾用荧光笔标出三个贡献点\", \"hours\": 0.3}\n"
-            "        ]\n"
-            "      }\n"
-            "    ]\n"
-            "  },\n"
-            "  {\n"
-            "    \"phase\": \"半精读：产出算法伪代码与数据流图\",\n"
-            "    \"total_hours\": 4.5,\n"
-            "    \"tasks\": [\n"
-            "      {\n"
-            "        \"title\": \"手写算法伪代码\",\n"
-            "        \"hours\": 2.0,\n"
-            "        \"subtasks\": [\n"
-            "          {\"title\": \"在笔记本上手写伪代码（用自己的话改写）\", \"hours\": 0.8},\n"
-            "          {\"title\": \"在每行伪代码旁标注对应公式编号\", \"hours\": 0.7}\n"
-            "        ]\n"
-            "      }\n"
-            "    ]\n"
-            "  },\n"
-            "  {\n"
-            "    \"phase\": \"精读：复现核心创新点并验证\",\n"
-            "    \"total_hours\": 11.0,\n"
-            "    \"tasks\": [\n"
-            "      {\n"
-            "        \"title\": \"圈定核心创新范围\",\n"
-            "        \"hours\": 1.0,\n"
-            "        \"subtasks\": [\n"
-            "          {\"title\": \"列出本文区别于baseline的核心创新点\", \"hours\": 0.5}\n"
-            "        ]\n"
-            "      }\n"
-            "    ]\n"
-            "  }\n"
-            "]"
-        )
+        prompt_text = app_config.get("reading_paper_prompt", "") or DEFAULT_PAPER_JSON_PROMPT
 
         dialog = QtWidgets.QDialog(parent)
         dialog.setWindowTitle("📄 文献导读 → JSON 操作说明")
@@ -462,16 +389,68 @@ class ReadingMixin:
 
         btns = QtWidgets.QHBoxLayout()
         btns.addStretch(1)
+        btn_edit = QtWidgets.QPushButton("修改提示词")
         btn_copy = QtWidgets.QPushButton("复制提示词")
         btn_close = QtWidgets.QPushButton("关闭")
+        btns.addWidget(btn_edit)
         btns.addWidget(btn_copy)
         btns.addWidget(btn_close)
         root.addLayout(btns)
 
+        prompt_holder = [prompt_text]
+
         def copy_prompt() -> None:
-            QtWidgets.QApplication.clipboard().setText(prompt_text)
+            QtWidgets.QApplication.clipboard().setText(prompt_holder[0])
             status_label.setText("提示词已复制到剪贴板。")
 
+        def edit_prompt() -> None:
+            edit_dlg = QtWidgets.QDialog(dialog)
+            edit_dlg.setWindowTitle("修改提示词")
+            edit_dlg.resize(820, 720)
+            edit_dlg.setModal(True)
+
+            edit_root = QtWidgets.QVBoxLayout(edit_dlg)
+            edit_root.setContentsMargins(12, 12, 12, 12)
+            edit_root.setSpacing(8)
+
+            hint = QtWidgets.QLabel("修改下方提示词后点击「保存」，留空则恢复默认提示词。")
+            hint.setStyleSheet("color:#666666")
+            hint.setWordWrap(True)
+            edit_root.addWidget(hint)
+
+            text_edit = QtWidgets.QTextEdit()
+            text_edit.setPlainText(prompt_holder[0])
+            edit_root.addWidget(text_edit, 1)
+
+            edit_btns = QtWidgets.QHBoxLayout()
+            edit_btns.addStretch(1)
+            btn_reset = QtWidgets.QPushButton("恢复默认")
+            btn_save = QtWidgets.QPushButton("保存")
+            btn_cancel = QtWidgets.QPushButton("取消")
+            edit_btns.addWidget(btn_reset)
+            edit_btns.addWidget(btn_save)
+            edit_btns.addWidget(btn_cancel)
+            edit_root.addLayout(edit_btns)
+
+            def reset_default() -> None:
+                text_edit.setPlainText(DEFAULT_PAPER_JSON_PROMPT)
+
+            btn_reset.clicked.connect(reset_default)
+            btn_save.clicked.connect(edit_dlg.accept)
+            btn_cancel.clicked.connect(edit_dlg.reject)
+
+            if edit_dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                new_text = text_edit.toPlainText()
+                if new_text.strip() == DEFAULT_PAPER_JSON_PROMPT.strip() or not new_text.strip():
+                    app_config.pop("reading_paper_prompt", None)
+                else:
+                    app_config["reading_paper_prompt"] = new_text
+                save_app_config()
+                prompt_holder[0] = new_text if new_text.strip() else DEFAULT_PAPER_JSON_PROMPT
+                edit.setPlainText(prompt_holder[0])
+                status_label.setText("提示词已保存。")
+
+        btn_edit.clicked.connect(edit_prompt)
         btn_copy.clicked.connect(copy_prompt)
         btn_close.clicked.connect(dialog.accept)
 
@@ -860,7 +839,7 @@ class ReadingMixin:
                 return
             status_label.setText("正在测试连接...")
             status_label.setStyleSheet("color:#2563EB;")
-            QtWidgets.QApplication.processEvents()
+            status_label.repaint()
 
             import urllib.request
             import ssl
@@ -877,7 +856,7 @@ class ReadingMixin:
             }
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
-                ctx = ssl._create_unverified_context()
+                ctx = ssl.create_default_context()
                 with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
                     resp.read()
                 status_label.setText("✅ 连接成功！")
@@ -930,7 +909,7 @@ class ReadingMixin:
         sig.advance.connect(dialog.advance_to)
 
         dialog.show()
-        QtWidgets.QApplication.processEvents()
+        dialog.repaint()
 
         result_holder: list[Any] = []
         error_holder: list[str] = []

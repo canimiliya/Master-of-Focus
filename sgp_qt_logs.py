@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta
 import os
+import sys
 from typing import Any
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -24,6 +25,8 @@ class LogsMixin:
             self.current_date_str = now_str
             self.handle_new_day_rollover(show_popup=False)
         self.check_review_reminder()
+        if hasattr(self, "notification_manager"):
+            self.notification_manager.check_review_time()
 
     def check_review_reminder(self) -> None:
         now = datetime.now()
@@ -129,8 +132,8 @@ class LogsMixin:
                     f.write(f"{content}")
                 elif log_type == "task_rollover":
                     f.write(f"{content}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[ERROR] log_to_txt failed: {e}", file=sys.stderr)
 
     def export_task_reports(self) -> None:
         import csv
@@ -208,7 +211,7 @@ class LogsMixin:
                 if not isinstance(log, dict):
                     continue
                 cat = str(log.get("category", "") or "")
-                if cat in ["科研", "理论/技术"]:
+                if cat not in ["科研", "理论/技术"]:
                     continue
                 task = str(log.get("task", "未知任务") or "未知任务")
                 start_str = log.get("start")
@@ -376,6 +379,15 @@ class LogsMixin:
 
     # ===================== focus logs & cancel logic =====================
 
+    @staticmethod
+    def _parse_dt_flexible(s: str) -> datetime | None:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(s, fmt)
+            except Exception:
+                continue
+        return None
+
     def normalize_dt(self, dt_obj: datetime) -> datetime:
         return dt_obj.replace(second=0, microsecond=0)
 
@@ -383,14 +395,12 @@ class LogsMixin:
         data = global_data
         if data is None:
             return
-        start_dt = self.normalize_dt(start_dt)
-        end_dt = self.normalize_dt(end_dt)
         if end_dt <= start_dt:
             return
         data.setdefault("focus_logs", []).append(
             {
-                "start": start_dt.strftime("%Y-%m-%d %H:%M"),
-                "end": end_dt.strftime("%Y-%m-%d %H:%M"),
+                "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                "end": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
                 "category": cat,
                 "task": text,
             }
@@ -408,13 +418,13 @@ class LogsMixin:
                 logs.append(item)
 
         if include_current and self.timer_running and self.current_stage == "study" and self.current_focus_task and self.focus_segment_start_dt:
-            now_dt = self.normalize_dt(datetime.now())
-            start_dt = self.normalize_dt(self.focus_segment_start_dt)
+            now_dt = datetime.now()
+            start_dt = self.focus_segment_start_dt
             if now_dt > start_dt:
                 logs.append(
                     {
-                        "start": start_dt.strftime("%Y-%m-%d %H:%M"),
-                        "end": now_dt.strftime("%Y-%m-%d %H:%M"),
+                        "start": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
                         "category": self.current_focus_task.cat,
                         "task": self.current_focus_task.text,
                     }
@@ -428,19 +438,24 @@ class LogsMixin:
             prefix = "昨天 "
         elif start_dt.date() != today:
             prefix = start_dt.strftime("%Y-%m-%d ")
-        return f"{prefix}{start_dt.strftime('%H:%M')} —— {end_dt.strftime('%H:%M')} <{cat}>-{text}\n"
+        dur_secs = int((end_dt - start_dt).total_seconds())
+        if dur_secs < 60:
+            dur_str = f"{dur_secs}秒"
+        else:
+            dur_str = f"{dur_secs // 60}分{dur_secs % 60}秒" if dur_secs % 60 else f"{dur_secs // 60}分钟"
+        return f"{prefix}{start_dt.strftime('%H:%M:%S')} —— {end_dt.strftime('%H:%M:%S')} ({dur_str}) <{cat}>-{text}\n"
 
     def check_focus_conflict(self, start_dt: datetime, end_dt: datetime) -> tuple[str | None, str | None]:
         data = global_data or {}
         logs = list(data.get("focus_logs", []) or [])
         if self.timer_running and self.current_stage == "study" and self.current_focus_task and self.focus_segment_start_dt:
-            now_dt = self.normalize_dt(datetime.now())
-            seg_start = self.normalize_dt(self.focus_segment_start_dt)
+            now_dt = datetime.now()
+            seg_start = self.focus_segment_start_dt
             if now_dt > seg_start:
                 logs.append(
                     {
-                        "start": seg_start.strftime("%Y-%m-%d %H:%M"),
-                        "end": now_dt.strftime("%Y-%m-%d %H:%M"),
+                        "start": seg_start.strftime("%Y-%m-%d %H:%M:%S"),
+                        "end": now_dt.strftime("%Y-%m-%d %H:%M:%S"),
                         "category": self.current_focus_task.cat,
                         "task": self.current_focus_task.text,
                     }
@@ -449,13 +464,12 @@ class LogsMixin:
         for item in logs:
             if not isinstance(item, dict):
                 continue
-            try:
-                existing_start = datetime.strptime(str(item.get("start")), "%Y-%m-%d %H:%M")
-                existing_end = datetime.strptime(str(item.get("end")), "%Y-%m-%d %H:%M")
-            except Exception:
+            existing_start = self._parse_dt_flexible(str(item.get("start", "")))
+            existing_end = self._parse_dt_flexible(str(item.get("end", "")))
+            if existing_start is None or existing_end is None:
                 continue
             if start_dt < existing_end and end_dt > existing_start:
-                conflict_range = f"{existing_start.strftime('%m-%d %H:%M')} —— {existing_end.strftime('%m-%d %H:%M')}"
+                conflict_range = f"{existing_start.strftime('%m-%d %H:%M:%S')} —— {existing_end.strftime('%m-%d %H:%M:%S')}"
                 conflict_task = f"<{item.get('category', '')}>-{item.get('task', '')}"
                 return conflict_range, conflict_task
         return None, None
@@ -562,12 +576,9 @@ class LogsMixin:
         for item in data.get("focus_logs", []) if isinstance(data.get("focus_logs"), list) else []:
             if not isinstance(item, dict):
                 continue
-            start_str = str(item.get("start", "") or "")
-            end_str = str(item.get("end", "") or "")
-            try:
-                start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(end_str, "%Y-%m-%d %H:%M")
-            except Exception:
+            start_dt = self._parse_dt_flexible(str(item.get("start", "") or ""))
+            end_dt = self._parse_dt_flexible(str(item.get("end", "") or ""))
+            if start_dt is None or end_dt is None:
                 continue
             key = (str(item.get("category", "") or ""), str(item.get("task", "") or ""))
             for d_str, mins in self._split_minutes_by_date(start_dt, end_dt):
@@ -637,15 +648,19 @@ class LogsMixin:
         else:
             lines: list[str] = []
             for item in logs:
-                try:
-                    start_dt = datetime.strptime(str(item["start"]), "%Y-%m-%d %H:%M")
-                    end_dt = datetime.strptime(str(item["end"]), "%Y-%m-%d %H:%M")
-                except Exception:
+                start_dt = self._parse_dt_flexible(str(item.get("start", "")))
+                end_dt = self._parse_dt_flexible(str(item.get("end", "")))
+                if start_dt is None or end_dt is None:
                     continue
-                lines.append(f"{start_dt.strftime('%H:%M')} —— {end_dt.strftime('%H:%M')} <{item.get('category', '')}>-{item.get('task', '')}")
+                dur_secs = int((end_dt - start_dt).total_seconds())
+                if dur_secs < 60:
+                    dur_str = f"{dur_secs}秒"
+                else:
+                    dur_str = f"{dur_secs // 60}分{dur_secs % 60}秒" if dur_secs % 60 else f"{dur_secs // 60}分钟"
+                lines.append(f"{start_dt.strftime('%H:%M:%S')} —— {end_dt.strftime('%H:%M:%S')} ({dur_str}) <{item.get('category', '')}>-{item.get('task', '')}")
             log_text.setPlainText("\n".join(lines) + ("\n" if lines else ""))
 
-        root.addWidget(QtWidgets.QLabel("已完成任务耗时"))
+        root.addWidget(QtWidgets.QLabel("任务专注耗时"))
         done_text = QtWidgets.QTextEdit()
         done_text.setReadOnly(True)
         done_text.setFont(self._font(size=9, bold=False))
@@ -653,29 +668,37 @@ class LogsMixin:
 
         totals: dict[tuple[str, str], float] = {}
         for item in logs:
-            try:
-                start_dt = datetime.strptime(str(item["start"]), "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(str(item["end"]), "%Y-%m-%d %H:%M")
-            except Exception:
+            start_dt = self._parse_dt_flexible(str(item.get("start", "")))
+            end_dt = self._parse_dt_flexible(str(item.get("end", "")))
+            if start_dt is None or end_dt is None:
                 continue
             mins = (end_dt - start_dt).total_seconds() / 60.0
             key = (str(item.get("category", "") or ""), str(item.get("task", "") or ""))
             totals[key] = totals.get(key, 0) + mins
 
-        data = global_data or {}
-        tasks_dict = data.get("today_structured_tasks", {})
+        tasks_dict = (global_data or {}).get("today_structured_tasks", {})
         out_lines: list[str] = []
+        matched_keys: set[tuple[str, str]] = set()
         if isinstance(tasks_dict, dict):
             for cat in TASK_CATS:
                 for t in tasks_dict.get(cat, []) if isinstance(tasks_dict.get(cat), list) else []:
-                    if not isinstance(t, dict) or not t.get("done"):
+                    if not isinstance(t, dict):
                         continue
-                    mins = totals.get((cat, str(t.get("text", "") or "")), 0)
+                    task_key = (cat, str(t.get("text", "") or ""))
+                    mins = totals.get(task_key, 0)
                     if mins <= 0:
                         continue
-                    out_lines.append(f"√已完成——耗时{self.format_minutes(mins)}——<{cat}>-{t.get('text', '')}")
+                    matched_keys.add(task_key)
+                    status = "√已完成" if t.get("done") else "○进行中"
+                    out_lines.append(f"{status}——耗时{self.format_minutes(mins)}——<{cat}>-{t.get('text', '')}")
 
-        done_text.setPlainText("\n".join(out_lines) + ("\n" if out_lines else "暂无已完成任务\n"))
+        for key, mins in totals.items():
+            if key in matched_keys or mins <= 0:
+                continue
+            cat, task = key
+            out_lines.append(f"○进行中——耗时{self.format_minutes(mins)}——<{cat}>-{task}")
+
+        done_text.setPlainText("\n".join(out_lines) + ("\n" if out_lines else "暂无任务记录\n"))
         win.exec()
 
     # ===================== reading module =====================

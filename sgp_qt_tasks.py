@@ -5,6 +5,7 @@ from typing import Any
 from PySide6 import QtWidgets
 
 from sgp_qt_core import TASK_CATS, app_config, global_data, inject_long_term_tasks_for_date, save_app_config, save_data
+from sgp_qt_notify import notify_task_checkin
 
 
 class TasksMixin:
@@ -646,6 +647,8 @@ class TasksMixin:
             save_data()
             self.update_task_status_label()
             self.export_task_reports()
+            if is_done:
+                notify_task_checkin(cat, task_text)
             if reading_changed or literature_changed:
                 self.refresh_reading_ui()
 
