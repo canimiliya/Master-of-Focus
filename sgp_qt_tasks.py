@@ -490,8 +490,6 @@ class TasksMixin:
                         if ex.get("category") != cat or ex.get("task") != task_text:
                             continue
                         s = str(ex.get("start", "") or "")
-                        if not s.startswith(today_str):
-                            continue
                         if latest_ex_start is None or s > latest_ex_start:
                             latest_ex_start = s
                             latest_ex_idx = i
@@ -508,10 +506,24 @@ class TasksMixin:
                         if ex.get("category") != cat or ex.get("task") != task_text:
                             continue
                         d = str(ex.get("date", "") or "")
-                        if not d.startswith(today_str):
-                            continue
                         if latest_ex_date is None or d > latest_ex_date:
                             latest_ex_date = d
+                            latest_ex_idx = i
+                    if latest_ex_idx is not None:
+                        del exclusions[latest_ex_idx]
+                        restored = True
+
+                if cat in ("科研", "理论/技术") and not restored:
+                    latest_ex_idx = None
+                    latest_ex_start = None
+                    for i, ex in enumerate(exclusions):
+                        if not isinstance(ex, dict) or ex.get("type") != "focus_log":
+                            continue
+                        if ex.get("category") != cat or ex.get("task") != task_text:
+                            continue
+                        s = str(ex.get("start", "") or "")
+                        if latest_ex_start is None or s > latest_ex_start:
+                            latest_ex_start = s
                             latest_ex_idx = i
                     if latest_ex_idx is not None:
                         del exclusions[latest_ex_idx]
@@ -614,8 +626,6 @@ class TasksMixin:
                         if item.get("category") != cat or item.get("task") != task_text:
                             continue
                         date_str = str(item.get("date", "") or "")
-                        if not date_str.startswith(today_str):
-                            continue
                         dur = item.get("study_time", item.get("duration", 0))
                         key = (date_str, cat, task_text, dur)
                         if key in excluded_history:
@@ -632,6 +642,28 @@ class TasksMixin:
                                 "study_time": latest_dur,
                                 "category": latest_item.get("category"),
                                 "task": latest_item.get("task"),
+                            }
+                        )
+
+                    latest_log = None
+                    latest_log_start = None
+                    for log in data.get("focus_logs", []) if isinstance(data.get("focus_logs"), list) else []:
+                        if not isinstance(log, dict):
+                            continue
+                        if log.get("category") != cat or log.get("task") != task_text:
+                            continue
+                        start_str = str(log.get("start", "") or "")
+                        if latest_log_start is None or start_str > latest_log_start:
+                            latest_log_start = start_str
+                            latest_log = log
+                    if latest_log is not None:
+                        exclusions.append(
+                            {
+                                "type": "focus_log",
+                                "start": latest_log.get("start"),
+                                "end": latest_log.get("end"),
+                                "category": latest_log.get("category"),
+                                "task": latest_log.get("task"),
                             }
                         )
 
